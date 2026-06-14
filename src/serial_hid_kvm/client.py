@@ -184,6 +184,14 @@ class KvmClient:
         jpeg_bytes = base64.b64decode(result["jpeg_b64"])
         return jpeg_bytes, result["width"], result["height"]
 
+    def set_timing(self, timing: dict) -> dict:
+        """Apply HID timing (seconds) to the server. Returns effective timing."""
+        return self.call("set_timing", timing)
+
+    def get_timing(self) -> dict:
+        """Return current effective HID timing (seconds) from the server."""
+        return self.call("get_timing")
+
     def get_device_info(self) -> dict:
         return self.call("get_device_info")
 

@@ -23,7 +23,21 @@ class Mouse:
         self._screen_width = screen_width
         self._screen_height = screen_height
         self._buttons: int = 0x00  # Currently pressed button bitmask
+        self._click_hold = 0.01  # Press->release hold for click() (seconds)
+        self._click_after = 0.0  # Settle delay after click() (seconds)
         atexit.register(self._release_all)
+
+    def set_timing(self, *, click_hold: float | None = None,
+                   click_after: float | None = None):
+        """Update mouse timing. Values are seconds; None leaves unchanged."""
+        if click_hold is not None:
+            self._click_hold = max(0.0, click_hold)
+        if click_after is not None:
+            self._click_after = max(0.0, click_after)
+
+    def get_timing(self) -> dict:
+        """Return current mouse timing in seconds."""
+        return {"click_hold": self._click_hold, "click_after": self._click_after}
 
     def _release_all(self):
         try:
@@ -72,12 +86,15 @@ class Mouse:
         if x is not None and y is not None:
             abs_x, abs_y = self._screen_to_abs(x, y)
             self._dev.send(build_mouse_abs_packet(btn_bit, abs_x, abs_y))
-            time.sleep(0.01)
+            time.sleep(self._click_hold)
             self._dev.send(build_mouse_abs_packet(0x00, abs_x, abs_y))
         else:
             self._dev.send(build_mouse_rel_packet(btn_bit, 0, 0))
-            time.sleep(0.01)
+            time.sleep(self._click_hold)
             self._dev.send(build_mouse_rel_packet(0x00, 0, 0))
+
+        if self._click_after > 0:
+            time.sleep(self._click_after)
 
     def mouse_down(self, button: str = "left", x: int | None = None, y: int | None = None):
         """Press and hold a mouse button.

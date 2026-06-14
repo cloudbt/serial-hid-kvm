@@ -5,7 +5,11 @@ import re
 import time
 
 from .hid_keycodes import char_to_hid, modifier_name_to_bit, special_key_to_hid
-from .hid_protocol import CH9329
+from .hid_protocol import (
+    CH9329,
+    build_keyboard_packet,
+    build_keyboard_release_packet,
+)
 
 
 class Keyboard:
@@ -13,8 +17,66 @@ class Keyboard:
 
     def __init__(self, ch9329: CH9329, char_delay: float = 0.02):
         self._dev = ch9329
+        # Inter-key delay between successive characters when typing (seconds).
         self._char_delay = char_delay
+        # Press->release hold for a single key from send_key/tags (seconds).
+        self._key_hold = 0.01
+        # Press->release hold for each character during type_text (seconds).
+        self._type_key_hold = 0.01
+        # Optional pre-delay after pressing modifiers before the key, for
+        # send_key/tag combos (seconds). 0 keeps the single-report behaviour.
+        self._combo_mod = 0.0
+        # Optional pre-delay after pressing Shift/modifier before a character
+        # during type_text (seconds). 0 keeps the single-report behaviour.
+        self._type_shift = 0.0
         atexit.register(self._release_all)
+
+    def set_timing(self, *, char_delay: float | None = None,
+                   key_hold: float | None = None,
+                   type_key_hold: float | None = None,
+                   combo_mod: float | None = None,
+                   type_shift: float | None = None):
+        """Update keyboard timing. All values are seconds; None leaves unchanged."""
+        if char_delay is not None:
+            self._char_delay = max(0.0, char_delay)
+        if key_hold is not None:
+            self._key_hold = max(0.0, key_hold)
+        if type_key_hold is not None:
+            self._type_key_hold = max(0.0, type_key_hold)
+        if combo_mod is not None:
+            self._combo_mod = max(0.0, combo_mod)
+        if type_shift is not None:
+            self._type_shift = max(0.0, type_shift)
+
+    def get_timing(self) -> dict:
+        """Return current keyboard timing in seconds."""
+        return {
+            "char_delay": self._char_delay,
+            "key_hold": self._key_hold,
+            "type_key_hold": self._type_key_hold,
+            "combo_mod": self._combo_mod,
+            "type_shift": self._type_shift,
+        }
+
+    def _emit(self, modifier: int, keycode: int,
+              hold: float | None = None, mod_pre: float = 0.0):
+        """Press (optionally stage modifiers first) and release one key.
+
+        Args:
+            modifier: Modifier bitmask sent with the key.
+            keycode: HID keycode.
+            hold: Press->release hold in seconds (defaults to key_hold).
+            mod_pre: If >0 and modifier set, press modifiers alone first and
+                wait this long before sending modifier+key.
+        """
+        hold = self._key_hold if hold is None else hold
+        if mod_pre > 0 and modifier:
+            self._dev.send(build_keyboard_packet(modifier, 0x00))
+            time.sleep(mod_pre)
+        self._dev.send(build_keyboard_packet(modifier, keycode))
+        if hold > 0:
+            time.sleep(hold)
+        self._dev.send(build_keyboard_release_packet())
 
     def _release_all(self):
         try:
@@ -76,7 +138,8 @@ class Keyboard:
                             "For unsupported characters or binary data, use base64 encoding."
                         )
                     modifier, keycode = mapping
-                    self._dev.send_keyboard(modifier, keycode)
+                    self._emit(modifier, keycode, hold=self._type_key_hold,
+                               mod_pre=self._type_shift if modifier else 0.0)
                     if delay > 0:
                         time.sleep(delay)
                 if idx < len(segments) - 1:
@@ -97,7 +160,8 @@ class Keyboard:
                         "For unsupported characters or binary data, use base64 encoding."
                     )
                 modifier, keycode = mapping
-                self._dev.send_keyboard(modifier, keycode)
+                self._emit(modifier, keycode, hold=self._type_key_hold,
+                           mod_pre=self._type_shift if modifier else 0.0)
                 if delay > 0:
                     time.sleep(delay)
 
@@ -196,12 +260,15 @@ class Keyboard:
         # Resolve keycode
         keycode = special_key_to_hid(key_part)
         if keycode is not None:
-            self._dev.send_keyboard(mod_bits, keycode)
+            self._emit(mod_bits, keycode,
+                       mod_pre=self._combo_mod if mod_bits else 0.0)
         elif len(key_part) == 1:
             mapping = char_to_hid(key_part)
             if mapping is not None:
                 char_mod, kc = mapping
-                self._dev.send_keyboard(mod_bits | char_mod, kc)
+                full_mod = mod_bits | char_mod
+                self._emit(full_mod, kc,
+                           mod_pre=self._combo_mod if full_mod else 0.0)
             else:
                 raise ValueError(f"Unknown key in tag {{{tag}}}: {key_part}")
         else:
@@ -229,7 +296,8 @@ class Keyboard:
         # Try as special key first
         keycode = special_key_to_hid(key)
         if keycode is not None:
-            self._dev.send_keyboard(mod_bits, keycode)
+            self._emit(mod_bits, keycode,
+                       mod_pre=self._combo_mod if mod_bits else 0.0)
             return
 
         # Try as single character
@@ -237,7 +305,9 @@ class Keyboard:
             mapping = char_to_hid(key)
             if mapping is not None:
                 char_mod, keycode = mapping
-                self._dev.send_keyboard(mod_bits | char_mod, keycode)
+                full_mod = mod_bits | char_mod
+                self._emit(full_mod, keycode,
+                           mod_pre=self._combo_mod if full_mod else 0.0)
                 return
 
         raise ValueError(f"Unknown key: {key}")

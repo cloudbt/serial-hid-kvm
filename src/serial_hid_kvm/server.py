@@ -278,6 +278,31 @@ class ApiDispatcher:
         b64 = base64.b64encode(jpeg_bytes).decode("ascii")
         return {"jpeg_b64": b64, "width": w, "height": h}
 
+    def _do_set_timing(self, params: dict) -> dict:
+        """Apply HID timing (seconds) to the keyboard and mouse.
+
+        Accepts any of: char_delay, key_hold, type_key_hold, combo_mod,
+        type_shift (keyboard); click_hold, click_after (mouse). Unknown keys
+        are ignored. Returns the effective timing after applying.
+        """
+        kb_keys = ("char_delay", "key_hold", "type_key_hold",
+                   "combo_mod", "type_shift")
+        mouse_keys = ("click_hold", "click_after")
+        kb_args = {k: float(params[k]) for k in kb_keys if k in params}
+        mouse_args = {k: float(params[k]) for k in mouse_keys if k in params}
+        if kb_args:
+            self._hw.get_keyboard().set_timing(**kb_args)
+        if mouse_args:
+            self._hw.get_mouse().set_timing(**mouse_args)
+        return self._do_get_timing(params)
+
+    def _do_get_timing(self, params: dict) -> dict:
+        """Return current effective HID timing (seconds) for keyboard + mouse."""
+        timing: dict = {}
+        timing.update(self._hw.get_keyboard().get_timing())
+        timing.update(self._hw.get_mouse().get_timing())
+        return timing
+
     def _do_get_device_info(self, params: dict) -> dict:
         from .serial_detect import list_ch340_ports
         info: dict = {}
