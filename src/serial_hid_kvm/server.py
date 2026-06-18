@@ -497,6 +497,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Web viewer frame rate (default: 20)")
     parser.add_argument("--web-quality", type=int, metavar="Q",
                         help="Web viewer JPEG quality 1-100 (default: 85)")
+    parser.add_argument("--recording-dir", type=str, metavar="DIR",
+                        help="Directory for browser screen recordings"
+                             " (default: ~/Videos)")
 
     # Keyboard
     parser.add_argument("--target-layout", type=str, metavar="NAME",

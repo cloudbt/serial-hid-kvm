@@ -156,6 +156,7 @@ Options:
   --web-port PORT           Web viewer port (default: 9330)
   --web-fps FPS             Web viewer frame rate (default: 20)
   --web-quality Q           Web viewer JPEG quality 1-100 (default: 60)
+  --recording-dir DIR       Folder for browser screen recordings (default: ~/Videos)
 
   --audio-device DEV        Audio input device index or name
                             (auto-detected from capture device VID:PID)
@@ -202,6 +203,7 @@ All use the `SHKVM_` prefix:
 | `SHKVM_WEB_PORT` | `9330` | Web viewer port |
 | `SHKVM_WEB_FPS` | `20` | Web viewer frame rate |
 | `SHKVM_WEB_QUALITY` | `60` | Web viewer JPEG quality (1-100) |
+| `SHKVM_RECORDING_DIR` | `~/Videos` | Folder for browser screen recordings |
 | `SHKVM_AUDIO_DEVICE` | auto-detect | Audio input device index or name |
 | `SHKVM_AUTOCROP` | `true` | Auto-crop black borders from capture (`0`/`false` to disable) |
 | `SHKVM_DEBUG_KEYS` | `0` | Enable keycode debug output (`1`/`true`) |
@@ -235,6 +237,7 @@ web_host: 127.0.0.1
 web_port: 9330
 web_fps: 20
 web_quality: 60
+recording_dir: C:\Users\whz\Videos
 audio_device: null
 autocrop: true
 debug_keys: false
@@ -298,6 +301,7 @@ Then open `http://localhost:9330` in a browser. To allow access from other machi
 - Dark theme, responsive canvas with aspect ratio preservation
 - Focus-loss detection: all keys released when canvas loses focus (no stuck keys)
 - Audio streaming with Unmute/Mute button (when `--audio-device` is set)
+- Screen recording with audio via the **Record** button (saves to the server, no save dialog)
 - Runs alongside the API server and preview window simultaneously
 
 As with the preview window, the mouse cursor is hidden by default. The **Cursor** button in the toolbar shows a local cursor that tracks your mouse instantly, reducing the feeling of input lag caused by video stream latency.
@@ -323,6 +327,18 @@ serial-hid-kvm --headless --web --audio-device 3
 ```
 
 The preview window plays audio immediately; the web viewer requires clicking the **Unmute** button (browser autoplay policy).
+
+### Screen Recording
+
+Click the **Record** button in the web viewer toolbar to record the live screen (and audio, if available) to a WebM file. Click it again to stop — a running timer is shown while recording.
+
+Unlike the upstream NanoKVM recorder, **no save dialog appears**: the browser records via `MediaRecorder` and streams the chunks back to the server over the existing WebSocket, and the server writes the file directly to a fixed folder. Set the destination with `--recording-dir`, `SHKVM_RECORDING_DIR`, or `recording_dir` in the config file. The default is the user's `~/Videos` folder (e.g. `C:\Users\<you>\Videos` on Windows).
+
+```bash
+serial-hid-kvm --headless --web --recording-dir "C:\Users\whz\Videos"
+```
+
+Files are named `recording-<timestamp>.webm`. Recording audio works whether or not speaker playback (the **Unmute** button) is enabled. Because the file is written by the server process, the folder is on the **machine running serial-hid-kvm**, not the browser's machine.
 
 ## API Server
 

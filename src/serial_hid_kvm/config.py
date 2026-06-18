@@ -53,6 +53,10 @@ class Config:
         self.web_fps: int = 20
         self.web_quality: int = 85
 
+        # Screen recording (web viewer): directory where the browser-recorded
+        # .webm files are saved by the server.  Default: ~/Videos.
+        self.recording_dir: str = str(Path.home() / "Videos")
+
         # Audio (web viewer only; None = disabled)
         self.audio_device: str | None = None
 
@@ -76,6 +80,7 @@ _FILE_KEYS = {
     "target_layout", "host_layout", "layouts_dir",
     "api_enabled", "api_host", "api_port",
     "web_enabled", "web_host", "web_port", "web_fps", "web_quality",
+    "recording_dir",
     "audio_device",
     "autocrop",
     "debug_keys", "headless", "show_cursor",
@@ -147,6 +152,7 @@ _ENV_MAP = {
     "SHKVM_WEB_PORT": "web_port",
     "SHKVM_WEB_FPS": "web_fps",
     "SHKVM_WEB_QUALITY": "web_quality",
+    "SHKVM_RECORDING_DIR": "recording_dir",
     "SHKVM_AUTOCROP": "autocrop",
     "SHKVM_DEBUG_KEYS": "debug_keys",
     "SHKVM_SHOW_CURSOR": "show_cursor",
@@ -198,6 +204,7 @@ def _apply_args(config: Config, args):
         "web_port": "web_port",
         "web_fps": "web_fps",
         "web_quality": "web_quality",
+        "recording_dir": "recording_dir",
     }
     for arg_name, attr in arg_to_attr.items():
         value = getattr(args, arg_name, None)

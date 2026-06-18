@@ -13,6 +13,9 @@ import asyncio
 import json
 import logging
 import queue
+import re
+import time
+from pathlib import Path
 
 import websockets
 from websockets.http11 import Response
@@ -169,6 +172,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:#1a1a2e;font-family:
 #container{display:flex;align-items:center;justify-content:center;width:100%;height:calc(100% - 36px);background:#0a0a1a;overflow:auto}
 canvas{display:block;image-rendering:auto;cursor:none}
 #toolbar button.active{background:#2a6a2a;border-color:#3a8a3a}
+#btnRec.recording{background:#7a1a1a;border-color:#c03030;animation:recpulse 1.5s ease-in-out infinite}
+@keyframes recpulse{0%,100%{opacity:1}50%{opacity:.55}}
 body.fs-autohide #toolbar{position:fixed;top:0;z-index:10;transform:translateY(-100%);transition:transform .3s ease;pointer-events:none;border-radius:0 0 8px 8px;box-shadow:0 2px 12px rgba(0,0,0,.5);cursor:grab}
 body.fs-autohide #toolbar.visible{transform:translateY(0);pointer-events:auto}
 body.fs-autohide #toolbar.dragging{cursor:grabbing;transition:none}
@@ -179,10 +184,11 @@ body.fs-autohide #container{height:100%}
 <div id="toolbar">
   <button id="btnCad" title="Send Ctrl+Alt+Delete to target">Ctrl+Alt+Del</button>
   <button id="btnAltTab" title="Send Alt+Tab to target">Alt+Tab</button>
-  #<button id="btnIme" title="Toggle target IME (sends &#x534a;&#x89d2;/&#x5168;&#x89d2;) — bypasses host IME">IME &#x3042;/A</button>
-  #<button id="btnCaps" title="Toggle Caps Lock (sends Shift+CapsLock for JIS keyboards)">Caps</button>
+  <!-- <button id="btnIme" title="Toggle target IME (sends &#x534a;&#x89d2;/&#x5168;&#x89d2;) — bypasses host IME">IME &#x3042;/A</button> -->
+  <!-- <button id="btnCaps" title="Toggle Caps Lock (sends Shift+CapsLock for JIS keyboards)">Caps</button> -->
   <button id="btnViewOnly" title="Toggle view-only mode (no input sent)">View Only</button>
   <button id="btnAudio" title="Toggle audio playback" style="display:none">&#x1f507; Audio</button>
+  <button id="btnRec" title="Record screen + audio to the server's recording folder">&#x23fa; Record</button>
   <button id="btnCursor" title="Toggle local cursor visibility">Cursor</button>
   <button id="btnScale" title="Toggle 1:1 / Fit scaling">1:1</button>
   <button id="btnFs" title="Toggle fullscreen">Fullscreen</button>
@@ -245,6 +251,13 @@ function connect() {
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "audio_config") { setupAudioConfig(msg); }
+        else if (msg.type === "rec_saved") {
+          statusEl.textContent = "Saved: " + msg.path;
+          setTimeout(() => { statusEl.textContent = "Connected"; }, 6000);
+        }
+        else if (msg.type === "rec_error") {
+          statusEl.textContent = "Recording error: " + msg.error;
+        }
       } catch(e) {}
     }
   };
@@ -390,23 +403,23 @@ document.getElementById("btnAltTab").addEventListener("click", () => {
   }, 100);
   canvas.focus();
 });
-# document.getElementById("btnIme").addEventListener("click", () => {
-#   // Toggle target IME via 半角/全角 (Backquote, HID 0x35). Synthesised in JS,
-#   // so it bypasses the controller's own IME, which swallows the physical key.
-#   send({type:"keydown", code:"Backquote"});
-#   setTimeout(() => { send({type:"keyup", code:"Backquote"}); }, 100);
-#   canvas.focus();
-# });
-# document.getElementById("btnCaps").addEventListener("click", () => {
-#   // Japanese (JIS) keyboards toggle Caps Lock with Shift+CapsLock(英数).
-#   send({type:"keydown", code:"ShiftLeft"});
-#   send({type:"keydown", code:"CapsLock"});
-#   setTimeout(() => {
-#     send({type:"keyup", code:"CapsLock"});
-#     send({type:"keyup", code:"ShiftLeft"});
-#   }, 100);
-#   canvas.focus();
-# });
+// document.getElementById("btnIme").addEventListener("click", () => {
+//   // Toggle target IME via 半角/全角 (Backquote, HID 0x35). Synthesised in JS,
+//   // so it bypasses the controller's own IME, which swallows the physical key.
+//   send({type:"keydown", code:"Backquote"});
+//   setTimeout(() => { send({type:"keyup", code:"Backquote"}); }, 100);
+//   canvas.focus();
+// });
+// document.getElementById("btnCaps").addEventListener("click", () => {
+//   // Japanese (JIS) keyboards toggle Caps Lock with Shift+CapsLock(英数).
+//   send({type:"keydown", code:"ShiftLeft"});
+//   send({type:"keydown", code:"CapsLock"});
+//   setTimeout(() => {
+//     send({type:"keyup", code:"CapsLock"});
+//     send({type:"keyup", code:"ShiftLeft"});
+//   }, 100);
+//   canvas.focus();
+// });
 document.getElementById("btnFs").addEventListener("click", () => {
   if (!document.fullscreenElement) document.documentElement.requestFullscreen();
   else document.exitFullscreen();
@@ -479,6 +492,9 @@ document.addEventListener("mouseup", () => {
 let audioCtx = null;
 let audioNode = null;
 let audioCfg = null;
+let playGain = null;   // controls speaker playback volume (mute = 0)
+let recDest = null;    // MediaStreamDestination feeding the recorder
+let audioOn = false;   // whether speaker playback is enabled
 
 const WORKLET_SRC = `
 class P extends AudioWorkletProcessor {
@@ -512,6 +528,9 @@ function setupAudioConfig(cfg) {
   document.getElementById("btnAudio").style.display = "";
 }
 
+// Build the audio graph once.  audioNode → playGain → speakers (gain gates
+// playback) and audioNode → recDest (always full-volume, for the recorder),
+// so recording captures audio even when speaker playback is muted.
 async function startAudio() {
   if (!audioCfg || audioCtx) return;
   audioCtx = new AudioContext({sampleRate: audioCfg.sampleRate});
@@ -521,7 +540,10 @@ async function startAudio() {
   URL.revokeObjectURL(url);
   audioNode = new AudioWorkletNode(audioCtx, "p",
     {outputChannelCount: [audioCfg.channels]});
-  audioNode.connect(audioCtx.destination);
+  playGain = audioCtx.createGain();
+  playGain.gain.value = audioOn ? 1 : 0;
+  audioNode.connect(playGain);
+  playGain.connect(audioCtx.destination);
 }
 
 function feedAudio(buf) {
@@ -534,19 +556,128 @@ function feedAudio(buf) {
 
 document.getElementById("btnAudio").addEventListener("click", async () => {
   const btn = document.getElementById("btnAudio");
-  if (!audioCtx) {
-    await startAudio();
-    btn.textContent = "\u{1f50a} Audio";
-    btn.classList.add("active");
-  } else if (audioCtx.state === "running") {
-    audioCtx.suspend();
-    btn.textContent = "\u{1f507} Audio";
-    btn.classList.remove("active");
-  } else {
-    audioCtx.resume();
-    btn.textContent = "\u{1f50a} Audio";
-    btn.classList.add("active");
+  if (!audioCtx) await startAudio();
+  if (audioCtx.state === "suspended") await audioCtx.resume();
+  audioOn = !audioOn;
+  if (playGain) playGain.gain.value = audioOn ? 1 : 0;
+  btn.textContent = (audioOn ? "\u{1f50a}" : "\u{1f507}") + " Audio";
+  btn.classList.toggle("active", audioOn);
+  canvas.focus();
+});
+
+// --- Screen recording ---
+// Records the live canvas (video) plus streamed audio via MediaRecorder, and
+// streams the resulting WebM chunks back to the server over the WebSocket.
+// The server writes them to its configured recording folder — no save dialog.
+let mediaRecorder = null;
+let recStream = null;
+let recording = false;
+let recStartTime = 0;
+let recTimer = null;
+
+async function ensureAudioForRecording() {
+  if (!audioCfg) return;            // no audio device on this server
+  if (!audioCtx) await startAudio();
+  if (audioCtx.state === "suspended") await audioCtx.resume();
+  if (!recDest) {
+    recDest = audioCtx.createMediaStreamDestination();
+    audioNode.connect(recDest);    // independent of playGain → always captured
   }
+}
+
+function pickMimeType() {
+  const prefs = [
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm;codecs=vp8",
+    "video/webm",
+  ];
+  for (const t of prefs) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return "";
+}
+
+async function startRecording() {
+  if (recording) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    statusEl.textContent = "Cannot record: not connected";
+    return;
+  }
+  if (!canvas.width || !canvas.height) {
+    statusEl.textContent = "Cannot record: no video yet";
+    return;
+  }
+  // Video from the canvas; capture on every repaint.
+  recStream = canvas.captureStream();
+  // Mix in audio if available.
+  await ensureAudioForRecording();
+  if (recDest) {
+    for (const t of recDest.stream.getAudioTracks()) recStream.addTrack(t);
+  }
+
+  const mimeType = pickMimeType();
+  const filename = "recording-" +
+    new Date().toISOString().replace(/[:.]/g, "-") + ".webm";
+  ws.send(JSON.stringify({type: "rec_start", filename}));
+
+  try {
+    mediaRecorder = new MediaRecorder(recStream,
+      mimeType ? {mimeType} : undefined);
+  } catch (e) {
+    statusEl.textContent = "Recording unsupported: " + e;
+    ws.send(JSON.stringify({type: "rec_stop"}));
+    return;
+  }
+
+  mediaRecorder.ondataavailable = (ev) => {
+    if (!ev.data || ev.data.size === 0) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ev.data.arrayBuffer().then((buf) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const out = new Uint8Array(buf.byteLength + 1);
+      out[0] = 0x10;                // client→server recording-chunk tag
+      out.set(new Uint8Array(buf), 1);
+      ws.send(out.buffer);
+    });
+  };
+  mediaRecorder.onstop = () => {
+    if (ws && ws.readyState === WebSocket.OPEN)
+      ws.send(JSON.stringify({type: "rec_stop"}));
+  };
+
+  mediaRecorder.start(1000);        // flush a chunk every second
+  recording = true;
+  recStartTime = Date.now();
+  const btn = document.getElementById("btnRec");
+  btn.classList.add("recording");
+  const tick = () => {
+    const s = Math.floor((Date.now() - recStartTime) / 1000);
+    const mm = String(Math.floor(s / 60)).padStart(2, "0");
+    const ss = String(s % 60).padStart(2, "0");
+    btn.textContent = "⏹ " + mm + ":" + ss;
+  };
+  tick();
+  recTimer = setInterval(tick, 500);
+}
+
+function stopRecording() {
+  if (!recording) return;
+  recording = false;
+  clearInterval(recTimer);
+  recTimer = null;
+  try { mediaRecorder.stop(); } catch (e) {}
+  if (recStream) {
+    for (const t of recStream.getVideoTracks()) t.stop();
+    recStream = null;
+  }
+  const btn = document.getElementById("btnRec");
+  btn.classList.remove("recording");
+  btn.textContent = "⏺ Record";
+}
+
+document.getElementById("btnRec").addEventListener("click", () => {
+  if (recording) stopRecording(); else startRecording();
   canvas.focus();
 });
 
@@ -741,82 +872,142 @@ class WebViewerServer:
         except queue.Empty:
             return None
 
+    def _open_recording(self, filename: str):
+        """Open a recording file in the configured directory for writing.
+
+        The client-supplied *filename* is reduced to a safe basename inside
+        ``config.recording_dir`` and forced to a ``.webm`` extension, so a
+        malicious or odd name can never escape the recording folder.
+
+        Returns:
+            ``(file_handle, Path)`` — caller is responsible for closing.
+        """
+        rec_dir = Path(self._config.recording_dir).expanduser()
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        name = Path(filename or "").name  # drop any directory components
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+        if not name or name in (".", ".."):
+            name = "recording-" + time.strftime("%Y%m%d-%H%M%S")
+        if not name.lower().endswith(".webm"):
+            name += ".webm"
+        path = rec_dir / name
+        return open(path, "wb"), path
+
     async def _recv_input(self, ws):
         """Receive and process input events from the client."""
         held_modifiers = 0
         held_keys: set[int] = set()  # currently pressed non-modifier HID keycodes
         ch9329 = self._hw.get_ch9329()
         loop = asyncio.get_running_loop()
+        rec_file = None  # open file handle while a recording is in progress
 
-        async for message in ws:
-            if not isinstance(message, str):
-                continue
-            try:
-                ev = json.loads(message)
-            except json.JSONDecodeError:
-                continue
-
-            ev_type = ev.get("type")
-
-            if ev_type == "keydown":
-                code = ev.get("code", "")
-                # Modifier key?
-                mod_bit = _JS_MOD_BITS.get(code)
-                if mod_bit is not None:
-                    held_modifiers |= mod_bit
-                    pkt = build_keyboard_report(held_modifiers, held_keys)
-                    await loop.run_in_executor(None, ch9329.send, pkt)
+        try:
+            async for message in ws:
+                # Binary frames from the client are screen-recording chunks
+                # (tag byte 0x10 + WebM data), written to the open recording.
+                if not isinstance(message, str):
+                    if (rec_file is not None and len(message) >= 1
+                            and message[0] == 0x10):
+                        await loop.run_in_executor(
+                            None, rec_file.write, message[1:])
                     continue
-                # Regular key
-                hid = _JS_CODE_TO_HID.get(code)
-                if hid is not None:
-                    held_keys.add(hid)
-                    pkt = build_keyboard_report(held_modifiers, held_keys)
-                    await loop.run_in_executor(None, ch9329.send, pkt)
-
-            elif ev_type == "keyup":
-                code = ev.get("code", "")
-                mod_bit = _JS_MOD_BITS.get(code)
-                if mod_bit is not None:
-                    held_modifiers &= ~mod_bit
-                    pkt = build_keyboard_report(held_modifiers, held_keys)
-                    await loop.run_in_executor(None, ch9329.send, pkt)
+                try:
+                    ev = json.loads(message)
+                except json.JSONDecodeError:
                     continue
-                # Release key
-                hid = _JS_CODE_TO_HID.get(code)
-                if hid is not None:
-                    held_keys.discard(hid)
-                pkt = build_keyboard_report(held_modifiers, held_keys)
-                await loop.run_in_executor(None, ch9329.send, pkt)
 
-            elif ev_type == "mousemove":
-                x = ev.get("x", 0)
-                y = ev.get("y", 0)
-                buttons = ev.get("buttons", 0)
-                pkt = build_mouse_abs_packet(buttons, x, y)
-                await loop.run_in_executor(None, ch9329.send, pkt)
+                ev_type = ev.get("type")
 
-            elif ev_type == "mousedown":
-                x = ev.get("x", 0)
-                y = ev.get("y", 0)
-                buttons = ev.get("buttons", 0)
-                pkt = build_mouse_abs_packet(buttons, x, y)
-                await loop.run_in_executor(None, ch9329.send, pkt)
+                if ev_type == "rec_start":
+                    if rec_file is not None:
+                        rec_file.close()
+                        rec_file = None
+                    try:
+                        rec_file, path = self._open_recording(
+                            ev.get("filename", ""))
+                        logger.info(f"Recording started: {path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to start recording: {e}")
+                        await ws.send(json.dumps(
+                            {"type": "rec_error", "error": str(e)}))
+                    continue
 
-            elif ev_type == "mouseup":
-                x = ev.get("x", 0)
-                y = ev.get("y", 0)
-                buttons = ev.get("buttons", 0)
-                pkt = build_mouse_abs_packet(buttons, x, y)
-                await loop.run_in_executor(None, ch9329.send, pkt)
+                elif ev_type == "rec_stop":
+                    if rec_file is not None:
+                        path = rec_file.name
+                        rec_file.close()
+                        rec_file = None
+                        logger.info(f"Recording saved: {path}")
+                        await ws.send(json.dumps(
+                            {"type": "rec_saved", "path": str(path)}))
+                    continue
 
-            elif ev_type == "scroll":
-                dy = ev.get("deltaY", 0)
-                scroll = max(-127, min(127, int(dy)))
-                pkt = build_mouse_rel_packet(0, 0, 0, scroll=scroll)
-                await loop.run_in_executor(None, ch9329.send, pkt)
+                elif ev_type == "keydown":
+                    code = ev.get("code", "")
+                    # Modifier key?
+                    mod_bit = _JS_MOD_BITS.get(code)
+                    if mod_bit is not None:
+                        held_modifiers |= mod_bit
+                        pkt = build_keyboard_report(held_modifiers, held_keys)
+                        await loop.run_in_executor(None, ch9329.send, pkt)
+                        continue
+                    # Regular key
+                    hid = _JS_CODE_TO_HID.get(code)
+                    if hid is not None:
+                        held_keys.add(hid)
+                        pkt = build_keyboard_report(held_modifiers, held_keys)
+                        await loop.run_in_executor(None, ch9329.send, pkt)
 
-            elif ev_type == "release_all":
-                await loop.run_in_executor(None, ch9329.release_all)
-                held_modifiers = 0
-                held_keys.clear()
+                elif ev_type == "keyup":
+                    code = ev.get("code", "")
+                    mod_bit = _JS_MOD_BITS.get(code)
+                    if mod_bit is not None:
+                        held_modifiers &= ~mod_bit
+                        pkt = build_keyboard_report(held_modifiers, held_keys)
+                        await loop.run_in_executor(None, ch9329.send, pkt)
+                        continue
+                    # Release key
+                    hid = _JS_CODE_TO_HID.get(code)
+                    if hid is not None:
+                        held_keys.discard(hid)
+                    pkt = build_keyboard_report(held_modifiers, held_keys)
+                    await loop.run_in_executor(None, ch9329.send, pkt)
+
+                elif ev_type == "mousemove":
+                    x = ev.get("x", 0)
+                    y = ev.get("y", 0)
+                    buttons = ev.get("buttons", 0)
+                    pkt = build_mouse_abs_packet(buttons, x, y)
+                    await loop.run_in_executor(None, ch9329.send, pkt)
+
+                elif ev_type == "mousedown":
+                    x = ev.get("x", 0)
+                    y = ev.get("y", 0)
+                    buttons = ev.get("buttons", 0)
+                    pkt = build_mouse_abs_packet(buttons, x, y)
+                    await loop.run_in_executor(None, ch9329.send, pkt)
+
+                elif ev_type == "mouseup":
+                    x = ev.get("x", 0)
+                    y = ev.get("y", 0)
+                    buttons = ev.get("buttons", 0)
+                    pkt = build_mouse_abs_packet(buttons, x, y)
+                    await loop.run_in_executor(None, ch9329.send, pkt)
+
+                elif ev_type == "scroll":
+                    dy = ev.get("deltaY", 0)
+                    scroll = max(-127, min(127, int(dy)))
+                    pkt = build_mouse_rel_packet(0, 0, 0, scroll=scroll)
+                    await loop.run_in_executor(None, ch9329.send, pkt)
+
+                elif ev_type == "release_all":
+                    await loop.run_in_executor(None, ch9329.release_all)
+                    held_modifiers = 0
+                    held_keys.clear()
+        finally:
+            if rec_file is not None:
+                try:
+                    rec_file.close()
+                    logger.info(f"Recording saved (client gone): {rec_file.name}")
+                except Exception:
+                    pass
