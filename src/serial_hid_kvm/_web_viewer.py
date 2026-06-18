@@ -179,6 +179,8 @@ body.fs-autohide #container{height:100%}
 <div id="toolbar">
   <button id="btnCad" title="Send Ctrl+Alt+Delete to target">Ctrl+Alt+Del</button>
   <button id="btnAltTab" title="Send Alt+Tab to target">Alt+Tab</button>
+  #<button id="btnIme" title="Toggle target IME (sends &#x534a;&#x89d2;/&#x5168;&#x89d2;) — bypasses host IME">IME &#x3042;/A</button>
+  #<button id="btnCaps" title="Toggle Caps Lock (sends Shift+CapsLock for JIS keyboards)">Caps</button>
   <button id="btnViewOnly" title="Toggle view-only mode (no input sent)">View Only</button>
   <button id="btnAudio" title="Toggle audio playback" style="display:none">&#x1f507; Audio</button>
   <button id="btnCursor" title="Toggle local cursor visibility">Cursor</button>
@@ -388,6 +390,23 @@ document.getElementById("btnAltTab").addEventListener("click", () => {
   }, 100);
   canvas.focus();
 });
+# document.getElementById("btnIme").addEventListener("click", () => {
+#   // Toggle target IME via 半角/全角 (Backquote, HID 0x35). Synthesised in JS,
+#   // so it bypasses the controller's own IME, which swallows the physical key.
+#   send({type:"keydown", code:"Backquote"});
+#   setTimeout(() => { send({type:"keyup", code:"Backquote"}); }, 100);
+#   canvas.focus();
+# });
+# document.getElementById("btnCaps").addEventListener("click", () => {
+#   // Japanese (JIS) keyboards toggle Caps Lock with Shift+CapsLock(英数).
+#   send({type:"keydown", code:"ShiftLeft"});
+#   send({type:"keydown", code:"CapsLock"});
+#   setTimeout(() => {
+#     send({type:"keyup", code:"CapsLock"});
+#     send({type:"keyup", code:"ShiftLeft"});
+#   }, 100);
+#   canvas.focus();
+# });
 document.getElementById("btnFs").addEventListener("click", () => {
   if (!document.fullscreenElement) document.documentElement.requestFullscreen();
   else document.exitFullscreen();
