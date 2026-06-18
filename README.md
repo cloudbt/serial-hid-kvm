@@ -302,6 +302,7 @@ Then open `http://localhost:9330` in a browser. To allow access from other machi
 - Focus-loss detection: all keys released when canvas loses focus (no stuck keys)
 - Audio streaming with Unmute/Mute button (when `--audio-device` is set)
 - Screen recording with audio via the **Record** button (saves to the server, no save dialog)
+- **Direct** (native) video mode for maximum smoothness when the browser is on the same machine as the capture card
 - Runs alongside the API server and preview window simultaneously
 
 As with the preview window, the mouse cursor is hidden by default. The **Cursor** button in the toolbar shows a local cursor that tracks your mouse instantly, reducing the feeling of input lag caused by video stream latency.
@@ -327,6 +328,19 @@ serial-hid-kvm --headless --web --audio-device 3
 ```
 
 The preview window plays audio immediately; the web viewer requires clicking the **Unmute** button (browser autoplay policy).
+
+### Direct (native) video mode
+
+The default web viewer streams JPEG frames from the server over WebSocket. That works from anywhere on the network, but every frame is re-encoded on the server and decoded in the browser, so at high resolutions it can feel less fluid than the official browser app.
+
+When **the browser runs on the same machine as the capture card** (e.g. you open `http://127.0.0.1:9330` locally), click the **Direct** button to switch to native video: the browser opens the capture device itself via `getUserMedia` and renders a real `<video>` element — GPU-decoded, 60 fps, ~zero added latency — exactly like the official app. Keyboard and mouse still travel over the WebSocket to the server's CH9329, so nothing else changes.
+
+While Direct mode is on, the server **releases the capture device** so the browser can open it. This means:
+
+- It only works when the viewer is local to the capture hardware (a remote browser has no access to the device).
+- The server-side API capture (`capture_frame`, OCR tooling, the preview window) cannot grab frames at the same time. Turn Direct mode off (or close the tab) before running those. Toggling Direct off hands the device back to the server automatically.
+
+Direct mode is per-browser and not persisted; the viewer always starts in normal server-stream mode.
 
 ### Screen Recording
 

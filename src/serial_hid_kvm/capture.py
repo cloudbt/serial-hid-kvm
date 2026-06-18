@@ -359,7 +359,13 @@ class ScreenCapture:
         """
         if self._running:
             return
-        self._ensure_open()
+        # Opening may fail transiently if the device is still held elsewhere
+        # (e.g. a browser using it in direct mode). Don't fail hard — the
+        # capture loop retries opening until it succeeds.
+        try:
+            self._ensure_open()
+        except Exception as e:
+            logger.warning(f"Capture open deferred (will retry): {e}")
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
@@ -376,8 +382,12 @@ class ScreenCapture:
         """Background thread: continuously capture frames."""
         while self._running:
             if self._cap is None or not self._cap.isOpened():
-                time.sleep(0.1)
-                continue
+                # (Re)open the device, retrying while it's still busy.
+                try:
+                    self._ensure_open()
+                except Exception:
+                    time.sleep(0.2)
+                    continue
 
             with self._lock:
                 ret, frame = self._cap.read()

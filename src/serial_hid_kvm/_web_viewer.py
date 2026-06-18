@@ -169,8 +169,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:#1a1a2e;font-family:
 #toolbar button:active{background:#0a2a50}
 #status{margin-left:auto;font-size:12px;color:#8888aa}
 #fps{font-size:12px;color:#8888aa;min-width:70px;text-align:right}
-#container{display:flex;align-items:center;justify-content:center;width:100%;height:calc(100% - 36px);background:#0a0a1a;overflow:auto}
-canvas{display:block;image-rendering:auto;cursor:none}
+#container{display:flex;align-items:center;justify-content:center;width:100%;height:calc(100% - 36px);background:#0a0a1a;overflow:auto;cursor:none;outline:none}
+#screen,#video{display:block;image-rendering:auto;background:#0a0a1a}
 #toolbar button.active{background:#2a6a2a;border-color:#3a8a3a}
 #btnRec.recording{background:#7a1a1a;border-color:#c03030;animation:recpulse 1.5s ease-in-out infinite}
 @keyframes recpulse{0%,100%{opacity:1}50%{opacity:.55}}
@@ -191,11 +191,12 @@ body.fs-autohide #container{height:100%}
   <button id="btnRec" title="Record screen + audio to the server's recording folder">&#x23fa; Record</button>
   <button id="btnCursor" title="Toggle local cursor visibility">Cursor</button>
   <button id="btnScale" title="Toggle 1:1 / Fit scaling">1:1</button>
+  <button id="btnDirect" title="Direct GPU video straight from the capture card (smoothest; uses this PC's device)">Direct</button>
   <button id="btnFs" title="Toggle fullscreen">Fullscreen</button>
   <span id="status">Connecting…</span>
   <span id="fps"></span>
 </div>
-<div id="container"><canvas id="screen"></canvas></div>
+<div id="container" tabindex="0"><canvas id="screen"></canvas><video id="video" playsinline muted style="display:none"></video></div>
 <script>
 "use strict";
 const canvas = document.getElementById("screen");
@@ -204,10 +205,22 @@ const statusEl = document.getElementById("status");
 const fpsEl = document.getElementById("fps");
 const container = document.getElementById("container");
 const toolbar = document.getElementById("toolbar");
+const video = document.getElementById("video");
 
 let ws = null;
 let frameCount = 0;
 let lastFpsTime = performance.now();
+
+// Direct (native) video mode: the browser opens the capture card itself via
+// getUserMedia and renders a real <video> element — same path the official app
+// uses — instead of decoding server JPEG frames onto the canvas.
+let videoMode = false;
+let directStream = null;       // active getUserMedia MediaStream in direct mode
+let serverCaptureLabel = "";   // capture-device name reported by the server
+
+function wsSend(obj) {  // control messages, not gated by view-only
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
 
 // --- WebSocket ---
 function connect() {
@@ -215,7 +228,12 @@ function connect() {
   ws = new WebSocket(proto + "//" + location.host + "/ws");
   ws.binaryType = "arraybuffer";
 
-  ws.onopen = () => { statusEl.textContent = "Connected"; };
+  ws.onopen = () => {
+    statusEl.textContent = videoMode ? "Direct video (native)" : "Connected";
+    // A reconnected server starts in stream mode; if we're showing native
+    // video, tell it to release the capture device again.
+    if (videoMode) wsSend({type: "stream", on: false});
+  };
   ws.onclose = () => {
     statusEl.textContent = "Disconnected — reconnecting…";
     setTimeout(connect, 2000);
@@ -238,6 +256,7 @@ function connect() {
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "audio_config") { setupAudioConfig(msg); }
+        else if (msg.type === "capture_device") { serverCaptureLabel = msg.label || ""; }
         else if (msg.type === "rec_saved") {
           statusEl.textContent = "Saved: " + msg.path;
           setTimeout(() => { statusEl.textContent = "Connected"; }, 6000);
@@ -254,9 +273,11 @@ function connect() {
 setInterval(() => {
   const now = performance.now();
   const elapsed = (now - lastFpsTime) / 1000;
-  fpsEl.textContent = (frameCount / elapsed).toFixed(1) + " fps";
+  const fps = frameCount / elapsed;
   frameCount = 0;
   lastFpsTime = now;
+  // <video> renders itself in direct mode, so there's no per-frame count.
+  fpsEl.textContent = videoMode ? "native" : fps.toFixed(1) + " fps";
 }, 2000);
 
 // --- Video frame rendering (decode off-thread, always draw the freshest) ---
@@ -286,36 +307,42 @@ async function renderLoop() {
   _decoding = false;
 }
 
-// --- Canvas sizing ---
+// --- Display sizing (works for both the canvas and the direct <video>) ---
 let scaleMode = "native";  // "native" = 1:1 pixel, "fit" = fit to window
 
+function activeEl() { return videoMode ? video : canvas; }
+function mediaW() { return videoMode ? video.videoWidth : canvas.width; }
+function mediaH() { return videoMode ? video.videoHeight : canvas.height; }
+
 function updateCanvasSize() {
-  if (canvas.width === 0 || canvas.height === 0) return;
+  const el = activeEl();
+  const mw = mediaW(), mh = mediaH();
+  if (!mw || !mh) return;
   if (scaleMode === "fit") {
     const cw = container.clientWidth;
     const ch = container.clientHeight;
-    const ar = canvas.width / canvas.height;
+    const ar = mw / mh;
     let dw, dh;
     if (cw / ch > ar) { dh = ch; dw = ch * ar; }
     else { dw = cw; dh = cw / ar; }
-    canvas.style.width = dw + "px";
-    canvas.style.height = dh + "px";
+    el.style.width = dw + "px";
+    el.style.height = dh + "px";
   } else {
-    canvas.style.width = canvas.width + "px";
-    canvas.style.height = canvas.height + "px";
+    el.style.width = mw + "px";
+    el.style.height = mh + "px";
   }
 }
 window.addEventListener("resize", updateCanvasSize);
+video.addEventListener("loadedmetadata", () => { if (videoMode) updateCanvasSize(); });
 
 // --- Mouse coordinate normalisation (0-4095) ---
 function mouseCoords(e) {
-  const rect = canvas.getBoundingClientRect();
-  const sx = canvas.width / rect.width;
-  const sy = canvas.height / rect.height;
-  const cx = (e.clientX - rect.left) * sx;
-  const cy = (e.clientY - rect.top) * sy;
-  const x = Math.max(0, Math.min(4095, Math.round(cx * 4096 / canvas.width)));
-  const y = Math.max(0, Math.min(4095, Math.round(cy * 4096 / canvas.height)));
+  const rect = activeEl().getBoundingClientRect();
+  if (!rect.width || !rect.height) return {x: 0, y: 0};
+  const fx = (e.clientX - rect.left) / rect.width;
+  const fy = (e.clientY - rect.top) / rect.height;
+  const x = Math.max(0, Math.min(4095, Math.round(fx * 4095)));
+  const y = Math.max(0, Math.min(4095, Math.round(fy * 4095)));
   return {x, y};
 }
 
@@ -341,7 +368,7 @@ function flushMouse() {
   pendingMouse = null;
   lastMouseSend = performance.now();
 }
-canvas.addEventListener("mousemove", (e) => {
+container.addEventListener("mousemove", (e) => {
   const {x, y} = mouseCoords(e);
   pendingMouse = {x, y, buttons: e.buttons};
   const dt = performance.now() - lastMouseSend;
@@ -353,40 +380,40 @@ canvas.addEventListener("mousemove", (e) => {
                                  16 - dt);
   }
 });
-canvas.addEventListener("mousedown", (e) => {
+container.addEventListener("mousedown", (e) => {
   e.preventDefault();
-  canvas.focus();
+  container.focus();
   const {x, y} = mouseCoords(e);
   send({type:"mousedown", x, y, buttons: e.buttons});
 });
-canvas.addEventListener("mouseup", (e) => {
+container.addEventListener("mouseup", (e) => {
   e.preventDefault();
   const {x, y} = mouseCoords(e);
   send({type:"mouseup", x, y, buttons: e.buttons});
 });
-canvas.addEventListener("wheel", (e) => {
+container.addEventListener("wheel", (e) => {
   e.preventDefault();
   const dy = e.deltaY > 0 ? -3 : 3;
   send({type:"scroll", deltaY: dy});
 }, {passive: false});
-canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+container.addEventListener("contextmenu", (e) => e.preventDefault());
 
 // --- Keyboard events ---
-canvas.setAttribute("tabindex", "0");
-canvas.addEventListener("keydown", (e) => {
+container.setAttribute("tabindex", "0");
+container.addEventListener("keydown", (e) => {
   if (viewOnly) return;
   e.preventDefault();
   e.stopPropagation();
   if (e.repeat) return;
   send({type:"keydown", code: e.code});
 });
-canvas.addEventListener("keyup", (e) => {
+container.addEventListener("keyup", (e) => {
   if (viewOnly) return;
   e.preventDefault();
   e.stopPropagation();
   send({type:"keyup", code: e.code});
 });
-canvas.addEventListener("blur", () => { send({type:"release_all"}); });
+container.addEventListener("blur", () => { send({type:"release_all"}); });
 
 // --- Toolbar ---
 document.getElementById("btnCad").addEventListener("click", () => {
@@ -398,7 +425,7 @@ document.getElementById("btnCad").addEventListener("click", () => {
     send({type:"keyup", code:"AltLeft"});
     send({type:"keyup", code:"ControlLeft"});
   }, 100);
-  canvas.focus();
+  container.focus();
 });
 document.getElementById("btnViewOnly").addEventListener("click", () => {
   const btn = document.getElementById("btnViewOnly");
@@ -412,10 +439,10 @@ document.getElementById("btnCursor").addEventListener("click", () => {
   showCursor = !showCursor;
   btn.classList.toggle("active", showCursor);
   updateCursor();
-  canvas.focus();
+  container.focus();
 });
 function updateCursor() {
-  canvas.style.cursor = showCursor ? "default" : "none";
+  container.style.cursor = showCursor ? "default" : "none";
   document.getElementById("btnCursor").classList.toggle("active", showCursor);
 }
 document.getElementById("btnScale").addEventListener("click", () => {
@@ -423,7 +450,7 @@ document.getElementById("btnScale").addEventListener("click", () => {
   if (scaleMode === "native") { scaleMode = "fit"; btn.textContent = "Fit"; }
   else { scaleMode = "native"; btn.textContent = "1:1"; }
   updateCanvasSize();
-  canvas.focus();
+  container.focus();
 });
 document.getElementById("btnAltTab").addEventListener("click", () => {
   send({type:"keydown", code:"AltLeft"});
@@ -432,14 +459,14 @@ document.getElementById("btnAltTab").addEventListener("click", () => {
     send({type:"keyup", code:"Tab"});
     send({type:"keyup", code:"AltLeft"});
   }, 100);
-  canvas.focus();
+  container.focus();
 });
 // document.getElementById("btnIme").addEventListener("click", () => {
 //   // Toggle target IME via 半角/全角 (Backquote, HID 0x35). Synthesised in JS,
 //   // so it bypasses the controller's own IME, which swallows the physical key.
 //   send({type:"keydown", code:"Backquote"});
 //   setTimeout(() => { send({type:"keyup", code:"Backquote"}); }, 100);
-//   canvas.focus();
+//   container.focus();
 // });
 // document.getElementById("btnCaps").addEventListener("click", () => {
 //   // Japanese (JIS) keyboards toggle Caps Lock with Shift+CapsLock(英数).
@@ -449,12 +476,12 @@ document.getElementById("btnAltTab").addEventListener("click", () => {
 //     send({type:"keyup", code:"CapsLock"});
 //     send({type:"keyup", code:"ShiftLeft"});
 //   }, 100);
-//   canvas.focus();
+//   container.focus();
 // });
 document.getElementById("btnFs").addEventListener("click", () => {
   if (!document.fullscreenElement) document.documentElement.requestFullscreen();
   else document.exitFullscreen();
-  canvas.focus();
+  container.focus();
 });
 // Fullscreen: keyboard lock + toolbar auto-hide
 let _tbLeft = 0;
@@ -593,7 +620,7 @@ document.getElementById("btnAudio").addEventListener("click", async () => {
   if (playGain) playGain.gain.value = audioOn ? 1 : 0;
   btn.textContent = (audioOn ? "\u{1f50a}" : "\u{1f507}") + " Audio";
   btn.classList.toggle("active", audioOn);
-  canvas.focus();
+  container.focus();
 });
 
 // --- Screen recording ---
@@ -635,12 +662,12 @@ async function startRecording() {
     statusEl.textContent = "Cannot record: not connected";
     return;
   }
-  if (!canvas.width || !canvas.height) {
+  if (!mediaW() || !mediaH()) {
     statusEl.textContent = "Cannot record: no video yet";
     return;
   }
-  // Video from the canvas; capture on every repaint.
-  recStream = canvas.captureStream();
+  // Video from the active display (canvas in stream mode, <video> in direct).
+  recStream = captureDisplayStream();
   // Mix in audio if available.
   await ensureAudioForRecording();
   if (recDest) {
@@ -707,16 +734,128 @@ function stopRecording() {
   btn.textContent = "⏺ Record";
 }
 
+function captureDisplayStream() {
+  if (videoMode) {
+    if (video.captureStream) return video.captureStream();
+    if (video.mozCaptureStream) return video.mozCaptureStream();
+  }
+  return canvas.captureStream();
+}
+
 document.getElementById("btnRec").addEventListener("click", () => {
   if (recording) stopRecording(); else startRecording();
-  canvas.focus();
+  container.focus();
+});
+
+// --- Direct (native) video mode ---
+// The browser opens the capture card itself (getUserMedia) and renders a real
+// <video>, matching the official app's smoothness. Input keeps flowing over the
+// WebSocket. The server releases the capture device while direct mode is on.
+function isWebcamLabel(l) {
+  l = (l || "").toLowerCase();
+  return ["webcam", "camera", "ir camera", "facetime", "front", "rear"]
+    .some((k) => l.includes(k));
+}
+
+function openCapture(deviceId) {
+  const v = {width: {ideal: 1920}, height: {ideal: 1280}, frameRate: {ideal: 60}};
+  if (deviceId) v.deviceId = {exact: deviceId};
+  return navigator.mediaDevices.getUserMedia({video: v, audio: false});
+}
+
+// The server needs a moment to release the capture device; retry while it's
+// still busy (but never retry a denied-permission error).
+async function openCaptureRetry(deviceId, tries) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try { return await openCapture(deviceId); }
+    catch (e) {
+      if (e && e.name === "NotAllowedError") throw e;
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+  throw lastErr;
+}
+
+async function findCaptureDeviceId() {
+  try {
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const cams = devs.filter((d) => d.kind === "videoinput" && d.label);
+    if (serverCaptureLabel) {
+      const m = cams.find((d) => d.label.includes(serverCaptureLabel) ||
+                                 serverCaptureLabel.includes(d.label));
+      if (m) return m.deviceId;
+    }
+    const nonCam = cams.find((d) => !isWebcamLabel(d.label));
+    return nonCam ? nonCam.deviceId : null;
+  } catch (e) { return null; }
+}
+
+async function enableDirect() {
+  const btn = document.getElementById("btnDirect");
+  btn.disabled = true;
+  statusEl.textContent = "Starting direct video…";
+  wsSend({type: "stream", on: false});   // ask server to release the device
+  try {
+    // First open (any device) to obtain permission, then refine by label.
+    let stream = await openCaptureRetry(null, 15);
+    const wantId = await findCaptureDeviceId();
+    const curId = stream.getVideoTracks()[0] &&
+                  stream.getVideoTracks()[0].getSettings().deviceId;
+    if (wantId && curId && wantId !== curId) {
+      stream.getTracks().forEach((t) => t.stop());
+      stream = await openCaptureRetry(wantId, 15);
+    }
+    directStream = stream;
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+    videoMode = true;
+    canvas.style.display = "none";
+    video.style.display = "block";
+    updateCanvasSize();
+    btn.classList.add("active");
+    btn.textContent = "Direct ●";
+    fpsEl.textContent = "native";
+    statusEl.textContent = "Direct video (native)";
+  } catch (e) {
+    videoMode = false;
+    wsSend({type: "stream", on: true});  // resume server stream on failure
+    statusEl.textContent = "Direct failed: " + (e && e.message ? e.message : e);
+  }
+  btn.disabled = false;
+  container.focus();
+}
+
+function disableDirect() {
+  const btn = document.getElementById("btnDirect");
+  videoMode = false;
+  if (directStream) {
+    directStream.getTracks().forEach((t) => t.stop());
+    directStream = null;
+  }
+  video.srcObject = null;
+  video.style.display = "none";
+  canvas.style.display = "block";
+  btn.classList.remove("active");
+  btn.textContent = "Direct";
+  // Give the browser a moment to fully release the device before the server
+  // reopens it for the JPEG stream.
+  setTimeout(() => wsSend({type: "stream", on: true}), 400);
+  updateCanvasSize();
+  statusEl.textContent = "Connected";
+  container.focus();
+}
+
+document.getElementById("btnDirect").addEventListener("click", () => {
+  if (videoMode) disableDirect(); else enableDirect();
 });
 
 // --- PWA ---
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
 
 // --- Start ---
-canvas.focus();
+container.focus();
 connect();
 </script>
 </body>
@@ -746,6 +885,12 @@ class WebViewerServer:
         self._server = None
         self._clients: set = set()
         self._audio = audio
+        # Number of clients currently consuming the server JPEG stream.  The
+        # capture device is only held while this is > 0, so a client switching
+        # to "direct" (native getUserMedia) video frees the device for the
+        # browser to open it.
+        self._stream_count = 0
+        self._cap_label: str | None = None  # cached capture-device name
 
     async def start(self):
         host = self._config.web_host
@@ -817,14 +962,25 @@ class WebViewerServer:
             msg += f"  UA: {ua_short}"
         logger.info(msg)
 
-        # Start capture thread on first client connection
-        if len(self._clients) == 1:
-            capture = self._hw.get_capture()
-            capture.start_capture_thread()
-            logger.info("Capture thread started (first web client)")
+        # Per-client stream state.  "event" gates _send_frames so the client
+        # can pause the server stream (e.g. when using direct/native video).
+        state = {"stream": False, "event": asyncio.Event()}
 
         audio_queue = None
+        loop = asyncio.get_running_loop()
         try:
+            # Client starts in server-stream mode (acquires the capture device).
+            await self._acquire_stream(state)
+
+            # Tell the client which capture device the server uses, so direct
+            # mode can pick the matching device via getUserMedia.
+            if self._cap_label is None:
+                self._cap_label = await loop.run_in_executor(
+                    None, self._capture_label)
+            await ws.send(json.dumps({
+                "type": "capture_device", "label": self._cap_label,
+            }))
+
             # Notify client about audio availability
             if self._audio is not None:
                 audio_queue = self._audio.subscribe()
@@ -835,8 +991,8 @@ class WebViewerServer:
                 }))
 
             tasks = [
-                asyncio.create_task(self._send_frames(ws)),
-                asyncio.create_task(self._recv_input(ws)),
+                asyncio.create_task(self._send_frames(ws, state)),
+                asyncio.create_task(self._recv_input(ws, state)),
             ]
             if audio_queue is not None:
                 tasks.append(asyncio.create_task(
@@ -854,16 +1010,71 @@ class WebViewerServer:
             if audio_queue is not None and self._audio is not None:
                 self._audio.unsubscribe(audio_queue)
             self._clients.discard(ws)
+            await self._release_stream(state)
             logger.info(f"Web client disconnected from {ip} ({len(self._clients)} total)")
 
-            # Stop capture thread when last client disconnects
-            if len(self._clients) == 0:
-                capture = self._hw.get_capture()
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, capture.stop_capture_thread)
-                logger.info("Capture thread stopped (no web clients)")
+    async def _acquire_stream(self, state: dict):
+        """Mark *state* as consuming the server stream; open device if first."""
+        if state["stream"]:
+            return
+        state["stream"] = True
+        state["event"].set()
+        self._stream_count += 1
+        if self._stream_count == 1:
+            capture = self._hw.get_capture()
+            loop = asyncio.get_running_loop()
+            # Non-fatal: the device may still be held by a browser in direct
+            # mode (e.g. right after a reconnect). The capture loop retries
+            # opening, so don't tear down the client connection here.
+            try:
+                await loop.run_in_executor(None, capture.start_capture_thread)
+                logger.info("Capture thread started (stream active)")
+            except Exception as e:
+                logger.warning(f"Capture start failed (device busy?): {e}")
 
-    async def _send_frames(self, ws):
+    async def _release_stream(self, state: dict):
+        """Mark *state* as no longer streaming; release device if last."""
+        if not state["stream"]:
+            return
+        state["stream"] = False
+        state["event"].clear()
+        self._stream_count -= 1
+        if self._stream_count == 0:
+            capture = self._hw.get_capture()
+            loop = asyncio.get_running_loop()
+            # Fully release the device (close, not just stop the thread) so a
+            # browser in direct mode can open it via getUserMedia. stop alone
+            # leaves the OpenCV VideoCapture holding the device → "Device in use".
+            await loop.run_in_executor(None, capture.close)
+            logger.info("Capture device released (no active streams)")
+
+    def _capture_label(self) -> str:
+        """Best-effort human-readable name of the configured capture device.
+
+        Lets the browser match the same device via ``getUserMedia`` in direct
+        mode.  Runs device enumeration (may shell out on Windows) so callers
+        should invoke it off the event loop and cache the result.
+        """
+        try:
+            from .capture import list_capture_devices, _is_webcam_name
+            devices = list_capture_devices()
+            dev = self._config.capture_device
+            if dev is not None:
+                dev_str = str(dev)
+                for d in devices:
+                    if d["device"] == dev_str:
+                        return d["name"]
+            # Auto-detect: first non-webcam, else first device.
+            for d in devices:
+                if not _is_webcam_name(d["name"]):
+                    return d["name"]
+            if devices:
+                return devices[0]["name"]
+        except Exception as e:
+            logger.debug(f"Capture label lookup failed: {e}")
+        return ""
+
+    async def _send_frames(self, ws, state: dict):
         """Stream JPEG frames to the client at configured FPS."""
         fps = self._config.web_fps
         quality = self._config.web_quality
@@ -876,6 +1087,10 @@ class WebViewerServer:
         # rate close to the configured target).
         next_t = loop.time()
         while True:
+            # Pause while the client is in direct mode (device released).
+            if not state["event"].is_set():
+                await state["event"].wait()
+                next_t = loop.time()
             result = await loop.run_in_executor(
                 None, capture.get_frame_jpeg, quality
             )
@@ -934,7 +1149,7 @@ class WebViewerServer:
         path = rec_dir / name
         return open(path, "wb"), path
 
-    async def _recv_input(self, ws):
+    async def _recv_input(self, ws, state: dict):
         """Receive and process input events from the client.
 
         Serial writes are decoupled from the WebSocket receive loop by a
@@ -996,7 +1211,16 @@ class WebViewerServer:
 
                 ev_type = ev.get("type")
 
-                if ev_type == "rec_start":
+                if ev_type == "stream":
+                    # Client toggling the server JPEG stream on/off (direct mode
+                    # turns it off so the browser can open the device natively).
+                    if ev.get("on"):
+                        await self._acquire_stream(state)
+                    else:
+                        await self._release_stream(state)
+                    continue
+
+                elif ev_type == "rec_start":
                     if rec_file is not None:
                         rec_file.close()
                         rec_file = None
