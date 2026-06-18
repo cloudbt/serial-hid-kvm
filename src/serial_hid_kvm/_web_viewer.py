@@ -227,21 +227,8 @@ function connect() {
       const type = view[0];
       const payload = ev.data.slice(1);
       if (type === 1) {
-        // Video frame (JPEG)
-        const blob = new Blob([payload], {type: "image/jpeg"});
-        const url = URL.createObjectURL(blob);
-        const img = new Image();
-        img.onload = () => {
-          if (canvas.width !== img.width || canvas.height !== img.height) {
-            canvas.width = img.width;
-            canvas.height = img.height;
-            updateCanvasSize();
-          }
-          ctx.drawImage(img, 0, 0);
-          URL.revokeObjectURL(url);
-          frameCount++;
-        };
-        img.src = url;
+        // Video frame (JPEG) — hand to the drop-stale renderer
+        queueFrame(payload);
       } else if (type === 2) {
         // Audio chunk (PCM int16 LE)
         feedAudio(payload);
@@ -271,6 +258,33 @@ setInterval(() => {
   frameCount = 0;
   lastFpsTime = now;
 }, 2000);
+
+// --- Video frame rendering (decode off-thread, always draw the freshest) ---
+let _pendingFrame = null;   // newest received-but-undrawn JPEG ArrayBuffer
+let _decoding = false;
+function queueFrame(buf) {
+  _pendingFrame = buf;       // keep only the most recent frame
+  if (!_decoding) renderLoop();
+}
+async function renderLoop() {
+  _decoding = true;
+  while (_pendingFrame) {
+    const buf = _pendingFrame;
+    _pendingFrame = null;    // anything that arrives during decode replaces this
+    try {
+      const bmp = await createImageBitmap(new Blob([buf], {type: "image/jpeg"}));
+      if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+        canvas.width = bmp.width;
+        canvas.height = bmp.height;
+        updateCanvasSize();
+      }
+      ctx.drawImage(bmp, 0, 0);
+      bmp.close();
+      frameCount++;
+    } catch (e) { /* skip undecodable frame */ }
+  }
+  _decoding = false;
+}
 
 // --- Canvas sizing ---
 let scaleMode = "native";  // "native" = 1:1 pixel, "fit" = fit to window
@@ -314,13 +328,30 @@ function send(obj) {
 }
 
 // --- Mouse events ---
+// Throttle moves to ~60Hz, but with a trailing send so the *final* position is
+// always delivered — otherwise the target cursor settles a few pixels off from
+// the host cursor whenever the last move falls inside the throttle window.
 let lastMouseSend = 0;
+let pendingMouse = null;
+let mouseTrailTimer = null;
+function flushMouse() {
+  if (!pendingMouse) return;
+  send({type:"mousemove", x: pendingMouse.x, y: pendingMouse.y,
+        buttons: pendingMouse.buttons});
+  pendingMouse = null;
+  lastMouseSend = performance.now();
+}
 canvas.addEventListener("mousemove", (e) => {
-  const now = performance.now();
-  if (now - lastMouseSend < 16) return;  // throttle ~60Hz
-  lastMouseSend = now;
   const {x, y} = mouseCoords(e);
-  send({type:"mousemove", x, y, buttons: e.buttons});
+  pendingMouse = {x, y, buttons: e.buttons};
+  const dt = performance.now() - lastMouseSend;
+  if (dt >= 16) {
+    if (mouseTrailTimer) { clearTimeout(mouseTrailTimer); mouseTrailTimer = null; }
+    flushMouse();
+  } else if (!mouseTrailTimer) {
+    mouseTrailTimer = setTimeout(() => { mouseTrailTimer = null; flushMouse(); },
+                                 16 - dt);
+  }
 });
 canvas.addEventListener("mousedown", (e) => {
   e.preventDefault();
@@ -840,6 +871,10 @@ class WebViewerServer:
         capture = self._hw.get_capture()
         loop = asyncio.get_running_loop()
 
+        # Pace against a moving deadline so encode time is absorbed into the
+        # frame interval instead of added on top of it (keeps the real frame
+        # rate close to the configured target).
+        next_t = loop.time()
         while True:
             result = await loop.run_in_executor(
                 None, capture.get_frame_jpeg, quality
@@ -850,7 +885,13 @@ class WebViewerServer:
                     await ws.send(b"\x01" + jpeg_bytes)
                 except websockets.ConnectionClosed:
                     break
-            await asyncio.sleep(interval)
+            next_t += interval
+            delay = next_t - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            else:
+                # Fell behind; reset the schedule to avoid a catch-up burst.
+                next_t = loop.time()
 
     async def _send_audio(self, ws, audio_queue: queue.Queue):
         """Stream PCM audio chunks to the client."""
@@ -894,13 +935,50 @@ class WebViewerServer:
         return open(path, "wb"), path
 
     async def _recv_input(self, ws):
-        """Receive and process input events from the client."""
+        """Receive and process input events from the client.
+
+        Serial writes are decoupled from the WebSocket receive loop by a
+        background *sender* task.  This prevents a flood of mouse-move events
+        from backing up behind the (relatively slow) serial port and making
+        the target cursor lag further and further behind: consecutive mouse
+        moves are coalesced so only the most recent position is ever sent,
+        while clicks, scrolls and keystrokes stay strictly ordered.
+        """
         held_modifiers = 0
         held_keys: set[int] = set()  # currently pressed non-modifier HID keycodes
         ch9329 = self._hw.get_ch9329()
         loop = asyncio.get_running_loop()
         rec_file = None  # open file handle while a recording is in progress
 
+        # (is_move, packet) entries.  Consecutive moves collapse to the latest.
+        send_queue: list[tuple[bool, bytes]] = []
+        wake = asyncio.Event()
+        stopping = False
+
+        async def sender():
+            while True:
+                await wake.wait()
+                wake.clear()
+                while send_queue:
+                    _is_move, pkt = send_queue.pop(0)
+                    await loop.run_in_executor(None, ch9329.send, pkt)
+                if stopping:
+                    return
+
+        def push(pkt: bytes):
+            send_queue.append((False, pkt))
+            wake.set()
+
+        def push_move(pkt: bytes):
+            # Coalesce with the previous pending move (if no discrete event has
+            # been queued since) so stale intermediate positions are dropped.
+            if send_queue and send_queue[-1][0]:
+                send_queue[-1] = (True, pkt)
+            else:
+                send_queue.append((True, pkt))
+            wake.set()
+
+        sender_task = asyncio.create_task(sender())
         try:
             async for message in ws:
                 # Binary frames from the client are screen-recording chunks
@@ -948,63 +1026,62 @@ class WebViewerServer:
                     mod_bit = _JS_MOD_BITS.get(code)
                     if mod_bit is not None:
                         held_modifiers |= mod_bit
-                        pkt = build_keyboard_report(held_modifiers, held_keys)
-                        await loop.run_in_executor(None, ch9329.send, pkt)
+                        push(build_keyboard_report(held_modifiers, held_keys))
                         continue
                     # Regular key
                     hid = _JS_CODE_TO_HID.get(code)
                     if hid is not None:
                         held_keys.add(hid)
-                        pkt = build_keyboard_report(held_modifiers, held_keys)
-                        await loop.run_in_executor(None, ch9329.send, pkt)
+                        push(build_keyboard_report(held_modifiers, held_keys))
 
                 elif ev_type == "keyup":
                     code = ev.get("code", "")
                     mod_bit = _JS_MOD_BITS.get(code)
                     if mod_bit is not None:
                         held_modifiers &= ~mod_bit
-                        pkt = build_keyboard_report(held_modifiers, held_keys)
-                        await loop.run_in_executor(None, ch9329.send, pkt)
+                        push(build_keyboard_report(held_modifiers, held_keys))
                         continue
                     # Release key
                     hid = _JS_CODE_TO_HID.get(code)
                     if hid is not None:
                         held_keys.discard(hid)
-                    pkt = build_keyboard_report(held_modifiers, held_keys)
-                    await loop.run_in_executor(None, ch9329.send, pkt)
+                    push(build_keyboard_report(held_modifiers, held_keys))
 
                 elif ev_type == "mousemove":
                     x = ev.get("x", 0)
                     y = ev.get("y", 0)
                     buttons = ev.get("buttons", 0)
-                    pkt = build_mouse_abs_packet(buttons, x, y)
-                    await loop.run_in_executor(None, ch9329.send, pkt)
+                    push_move(build_mouse_abs_packet(buttons, x, y))
 
                 elif ev_type == "mousedown":
                     x = ev.get("x", 0)
                     y = ev.get("y", 0)
                     buttons = ev.get("buttons", 0)
-                    pkt = build_mouse_abs_packet(buttons, x, y)
-                    await loop.run_in_executor(None, ch9329.send, pkt)
+                    push(build_mouse_abs_packet(buttons, x, y))
 
                 elif ev_type == "mouseup":
                     x = ev.get("x", 0)
                     y = ev.get("y", 0)
                     buttons = ev.get("buttons", 0)
-                    pkt = build_mouse_abs_packet(buttons, x, y)
-                    await loop.run_in_executor(None, ch9329.send, pkt)
+                    push(build_mouse_abs_packet(buttons, x, y))
 
                 elif ev_type == "scroll":
                     dy = ev.get("deltaY", 0)
                     scroll = max(-127, min(127, int(dy)))
-                    pkt = build_mouse_rel_packet(0, 0, 0, scroll=scroll)
-                    await loop.run_in_executor(None, ch9329.send, pkt)
+                    push(build_mouse_rel_packet(0, 0, 0, scroll=scroll))
 
                 elif ev_type == "release_all":
-                    await loop.run_in_executor(None, ch9329.release_all)
                     held_modifiers = 0
                     held_keys.clear()
+                    push(build_keyboard_report(0, ()))
+                    push(build_mouse_rel_packet(0, 0, 0))
         finally:
+            stopping = True
+            wake.set()
+            try:
+                await sender_task
+            except Exception:
+                pass
             if rec_file is not None:
                 try:
                     rec_file.close()
