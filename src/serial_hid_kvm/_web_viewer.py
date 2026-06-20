@@ -213,6 +213,8 @@ const container = document.getElementById("container");
 const toolbar = document.getElementById("toolbar");
 const video = document.getElementById("video");
 const hint = document.getElementById("hint");
+document.getElementById("btnFs").hidden =
+  new URLSearchParams(location.search).has("kiosk");
 
 let toolbarHidden = true;   // toolbar starts hidden; Ctrl+Alt+Enter toggles it
 let hintTimer = null;
