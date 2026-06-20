@@ -10,6 +10,7 @@ Usage (integrated into server.py):
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import queue
@@ -190,11 +191,11 @@ body.tb-hidden #container{height:100%}
   <button id="btnAltTab" title="Send Alt+Tab to target">Alt+Tab</button>
   <!-- <button id="btnIme" title="Toggle target IME (sends &#x534a;&#x89d2;/&#x5168;&#x89d2;) — bypasses host IME">IME &#x3042;/A</button> -->
   <!-- <button id="btnCaps" title="Toggle Caps Lock (sends Shift+CapsLock for JIS keyboards)">Caps</button> -->
-  <button id="btnViewOnly" title="Toggle view-only mode (no input sent)">View Only</button>
+  <!-- <button id="btnViewOnly" title="Toggle view-only mode (no input sent)">View Only</button> -->
   <button id="btnAudio" title="Toggle audio playback" style="display:none">&#x1f507; Audio</button>
   <button id="btnRec" title="Record screen + audio to the server's recording folder">&#x23fa; Record</button>
   <button id="btnCursor" title="Toggle local cursor visibility">Cursor</button>
-  <button id="btnScale" title="Toggle 1:1 / Fit scaling">1:1</button>
+  <button id="btnScale" title="Toggle 1:1 / Fit scaling">Fit</button>
   <button id="btnDirect" title="Direct GPU video straight from the capture card (smoothest; uses this PC's device)">Direct</button>
   <button id="btnFs" title="Toggle fullscreen">Fullscreen</button>
   <span id="status">Connecting…</span>
@@ -226,9 +227,22 @@ let lastFpsTime = performance.now();
 let videoMode = false;
 let directStream = null;       // active getUserMedia MediaStream in direct mode
 let serverCaptureLabel = "";   // capture-device name reported by the server
+let _directTried = false;      // auto-enable Direct once on first connect
 
 function wsSend(obj) {  // control messages, not gated by view-only
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+// --- Auto-reload when the server's frontend changed ---
+// The server sends a fingerprint of its embedded HTML/JS on connect. We record
+// the first one; if a later (reconnected) server reports a different build, the
+// process was restarted with new code, so reload to pick it up. A plain restart
+// keeps the same fingerprint and never reloads.
+let _build = null;
+function checkBuild(b) {
+  if (!b) return;
+  if (_build === null) { _build = b; return; }
+  if (b !== _build) location.reload();
 }
 
 // --- WebSocket ---
@@ -242,6 +256,11 @@ function connect() {
     // A reconnected server starts in stream mode; if we're showing native
     // video, tell it to release the capture device again.
     if (videoMode) wsSend({type: "stream", on: false});
+    // Direct video is on by default: enable it once on the first connect (not
+    // on every reconnect — that would re-prompt for the camera permission). If
+    // it fails (permission denied), enableDirect() falls back to the server
+    // stream automatically.
+    else if (!_directTried) { _directTried = true; enableDirect(); }
   };
   ws.onclose = () => {
     statusEl.textContent = "Disconnected — reconnecting…";
@@ -264,7 +283,8 @@ function connect() {
       // Text message (JSON)
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "audio_config") { setupAudioConfig(msg); }
+        if (msg.type === "hello") { checkBuild(msg.build); }
+        else if (msg.type === "audio_config") { setupAudioConfig(msg); }
         else if (msg.type === "capture_device") { serverCaptureLabel = msg.label || ""; }
         else if (msg.type === "rec_saved") {
           statusEl.textContent = "Saved: " + msg.path;
@@ -319,7 +339,7 @@ async function renderLoop() {
 }
 
 // --- Display sizing (works for both the canvas and the direct <video>) ---
-let scaleMode = "native";  // "native" = 1:1 pixel, "fit" = fit to window
+let scaleMode = "fit";  // "native" = 1:1 pixel, "fit" = fit to window (default)
 
 function activeEl() { return videoMode ? video : canvas; }
 function mediaW() { return videoMode ? video.videoWidth : canvas.width; }
@@ -358,7 +378,7 @@ function mouseCoords(e) {
 }
 
 let viewOnly = false;
-let showCursor = false;
+let showCursor = true;   // local cursor visible by default
 
 function send(obj) {
   if (viewOnly) return;
@@ -438,13 +458,13 @@ document.getElementById("btnCad").addEventListener("click", () => {
   }, 100);
   container.focus();
 });
-document.getElementById("btnViewOnly").addEventListener("click", () => {
-  const btn = document.getElementById("btnViewOnly");
-  viewOnly = !viewOnly;
-  btn.classList.toggle("active", viewOnly);
-  if (viewOnly) showCursor = true;
-  updateCursor();
-});
+// document.getElementById("btnViewOnly").addEventListener("click", () => {
+//   const btn = document.getElementById("btnViewOnly");
+//   viewOnly = !viewOnly;
+//   btn.classList.toggle("active", viewOnly);
+//   if (viewOnly) showCursor = true;
+//   updateCursor();
+// });
 document.getElementById("btnCursor").addEventListener("click", () => {
   const btn = document.getElementById("btnCursor");
   showCursor = !showCursor;
@@ -563,7 +583,7 @@ let audioNode = null;
 let audioCfg = null;
 let playGain = null;   // controls speaker playback volume (mute = 0)
 let recDest = null;    // MediaStreamDestination feeding the recorder
-let audioOn = false;   // whether speaker playback is enabled
+let audioOn = true;    // speaker playback enabled by default
 
 const WORKLET_SRC = `
 class P extends AudioWorkletProcessor {
@@ -595,6 +615,34 @@ registerProcessor("p", P);
 function setupAudioConfig(cfg) {
   audioCfg = cfg;
   document.getElementById("btnAudio").style.display = "";
+  if (audioOn) enableAudioPlayback();   // default-on, no manual click needed
+}
+
+// Start speaker playback and reflect the on-state on the button. Browsers block
+// AudioContext until a user gesture, so if it's still suspended we resume on the
+// first interaction (this is best-effort; recording is unaffected either way).
+let _audioArmed = false;
+async function enableAudioPlayback() {
+  if (!audioCtx) await startAudio();
+  if (audioCtx && audioCtx.state === "suspended") {
+    try { await audioCtx.resume(); } catch (e) {}
+  }
+  if (audioCtx && audioCtx.state === "suspended" && !_audioArmed) {
+    _audioArmed = true;
+    const resume = () => {
+      if (audioCtx && audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+      window.removeEventListener("pointerdown", resume, true);
+      window.removeEventListener("keydown", resume, true);
+      _audioArmed = false;
+    };
+    window.addEventListener("pointerdown", resume, true);
+    window.addEventListener("keydown", resume, true);
+  }
+  audioOn = true;
+  if (playGain) playGain.gain.value = 1;
+  const btn = document.getElementById("btnAudio");
+  btn.textContent = "\u{1f50a} Audio";
+  btn.classList.add("active");
 }
 
 // Build the audio graph once.  audioNode → playGain → speakers (gain gates
@@ -917,12 +965,21 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
 
 // --- Start ---
 document.body.classList.add("tb-hidden");   // toolbar hidden until Ctrl+Alt+Enter
+updateCursor();                             // apply default cursor visibility
 showHint("Ctrl+Alt+Enter: toolbar");
 container.focus();
 connect();
 </script>
 </body>
 </html>"""
+
+# Short fingerprint of the embedded frontend. Sent to each client on connect so
+# an already-open viewer can auto-reload itself after the server is restarted
+# with changed HTML/JS — otherwise the tab silently reconnects its WebSocket and
+# keeps running the OLD code, making edits look like they "didn't take effect".
+# It only changes when _VIEWER_HTML changes, so a plain restart never forces a
+# needless reload.
+_BUILD_ID = hashlib.md5(_VIEWER_HTML.encode("utf-8")).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -1034,6 +1091,10 @@ class WebViewerServer:
         try:
             # Client starts in server-stream mode (acquires the capture device).
             await self._acquire_stream(state)
+
+            # Frontend fingerprint: lets an open viewer auto-reload when the
+            # server has been restarted with changed HTML/JS.
+            await ws.send(json.dumps({"type": "hello", "build": _BUILD_ID}))
 
             # Tell the client which capture device the server uses, so direct
             # mode can pick the matching device via getUserMedia.
