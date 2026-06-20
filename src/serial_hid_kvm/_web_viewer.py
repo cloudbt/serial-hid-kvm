@@ -178,6 +178,10 @@ body.fs-autohide #toolbar{position:fixed;top:0;z-index:10;transform:translateY(-
 body.fs-autohide #toolbar.visible{transform:translateY(0);pointer-events:auto}
 body.fs-autohide #toolbar.dragging{cursor:grabbing;transition:none}
 body.fs-autohide #container{height:100%}
+body.tb-hidden #toolbar{display:none}
+body.tb-hidden #container{height:100%}
+#hint{position:fixed;top:8px;left:50%;transform:translateX(-50%);background:rgba(22,33,62,.92);border:1px solid #0f3460;color:#e0e0e0;padding:4px 12px;border-radius:6px;font-size:12px;z-index:20;opacity:0;transition:opacity .4s;pointer-events:none;white-space:nowrap}
+#hint.show{opacity:1}
 </style>
 </head>
 <body>
@@ -197,6 +201,7 @@ body.fs-autohide #container{height:100%}
   <span id="fps"></span>
 </div>
 <div id="container" tabindex="0"><canvas id="screen"></canvas><video id="video" playsinline muted style="display:none"></video></div>
+<div id="hint"></div>
 <script>
 "use strict";
 const canvas = document.getElementById("screen");
@@ -206,6 +211,10 @@ const fpsEl = document.getElementById("fps");
 const container = document.getElementById("container");
 const toolbar = document.getElementById("toolbar");
 const video = document.getElementById("video");
+const hint = document.getElementById("hint");
+
+let toolbarHidden = true;   // toolbar starts hidden; Ctrl+Alt+Enter toggles it
+let hintTimer = null;
 
 let ws = null;
 let frameCount = 0;
@@ -259,10 +268,12 @@ function connect() {
         else if (msg.type === "capture_device") { serverCaptureLabel = msg.label || ""; }
         else if (msg.type === "rec_saved") {
           statusEl.textContent = "Saved: " + msg.path;
+          if (toolbarHidden) showHint("Saved: " + msg.path);
           setTimeout(() => { statusEl.textContent = "Connected"; }, 6000);
         }
         else if (msg.type === "rec_error") {
           statusEl.textContent = "Recording error: " + msg.error;
+          if (toolbarHidden) showHint("Recording error: " + msg.error);
         }
       } catch(e) {}
     }
@@ -747,6 +758,54 @@ document.getElementById("btnRec").addEventListener("click", () => {
   container.focus();
 });
 
+// --- Toolbar show/hide hotkey (Ctrl+Alt+Enter) ---
+// The toolbar is hidden by default so it never overlaps the target's top edge.
+// Ctrl+Alt+Enter toggles it; the combo is captured at the window level (capture
+// phase) and swallowed so it is never forwarded to the target.
+function showHint(text) {
+  if (text) hint.textContent = text;
+  hint.classList.add("show");
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => hint.classList.remove("show"), 2500);
+}
+function hideHint() {
+  clearTimeout(hintTimer);
+  hint.classList.remove("show");
+}
+function toggleToolbar() {
+  toolbarHidden = !toolbarHidden;
+  document.body.classList.toggle("tb-hidden", toolbarHidden);
+  if (toolbarHidden) {
+    toolbar.classList.remove("visible");
+    showHint("Ctrl+Alt+Enter: toolbar");
+  } else {
+    hideHint();
+    if (document.fullscreenElement) {   // make it appear despite fs auto-hide
+      toolbar.classList.add("visible");
+      requestAnimationFrame(_tbCenter);
+    }
+  }
+  updateCanvasSize();
+  container.focus();
+}
+
+let _hotkeyEnter = false;   // suppress the matching Enter keyup to the target
+window.addEventListener("keydown", (e) => {
+  if (e.ctrlKey && e.altKey && (e.code === "Enter" || e.code === "NumpadEnter")) {
+    e.preventDefault();
+    e.stopPropagation();
+    _hotkeyEnter = true;
+    if (!e.repeat) toggleToolbar();
+  }
+}, true);
+window.addEventListener("keyup", (e) => {
+  if (_hotkeyEnter && (e.code === "Enter" || e.code === "NumpadEnter")) {
+    e.preventDefault();
+    e.stopPropagation();
+    _hotkeyEnter = false;
+  }
+}, true);
+
 // --- Direct (native) video mode ---
 // The browser opens the capture card itself (getUserMedia) and renders a real
 // <video>, matching the official app's smoothness. Input keeps flowing over the
@@ -821,7 +880,9 @@ async function enableDirect() {
   } catch (e) {
     videoMode = false;
     wsSend({type: "stream", on: true});  // resume server stream on failure
-    statusEl.textContent = "Direct failed: " + (e && e.message ? e.message : e);
+    const emsg = "Direct failed: " + (e && e.message ? e.message : e);
+    statusEl.textContent = emsg;
+    if (toolbarHidden) showHint(emsg);
   }
   btn.disabled = false;
   container.focus();
@@ -855,6 +916,8 @@ document.getElementById("btnDirect").addEventListener("click", () => {
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
 
 // --- Start ---
+document.body.classList.add("tb-hidden");   // toolbar hidden until Ctrl+Alt+Enter
+showHint("Ctrl+Alt+Enter: toolbar");
 container.focus();
 connect();
 </script>
