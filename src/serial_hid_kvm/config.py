@@ -37,7 +37,7 @@ class Config:
         self.capture_fourcc: str = "MJPG"
 
         # Keyboard layout
-        self.target_layout: str = "us104"
+        self.target_layout: str = "jp106"
         self.host_layout: str = "auto"
         self.layouts_dir: str | None = None
 
