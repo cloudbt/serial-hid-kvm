@@ -229,7 +229,6 @@ let lastFpsTime = performance.now();
 let videoMode = false;
 let directStream = null;       // active getUserMedia MediaStream in direct mode
 let serverCaptureLabel = "";   // capture-device name reported by the server
-let _directTried = false;      // auto-enable Direct once on first connect
 
 function wsSend(obj) {  // control messages, not gated by view-only
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
@@ -258,11 +257,9 @@ function connect() {
     // A reconnected server starts in stream mode; if we're showing native
     // video, tell it to release the capture device again.
     if (videoMode) wsSend({type: "stream", on: false});
-    // Direct video is on by default: enable it once on the first connect (not
-    // on every reconnect — that would re-prompt for the camera permission). If
-    // it fails (permission denied), enableDirect() falls back to the server
-    // stream automatically.
-    else if (!_directTried) { _directTried = true; enableDirect(); }
+    // Direct video defaults OFF so the server keeps the capture device and can
+    // share frames with server-side OCR / MCP / capture_frame while the viewer
+    // is open. Click the Direct button to switch to native getUserMedia video.
   };
   ws.onclose = () => {
     statusEl.textContent = "Disconnected — reconnecting…";
