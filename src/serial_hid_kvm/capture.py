@@ -444,6 +444,30 @@ class ScreenCapture:
             return frame.copy()
         return None
 
+    @property
+    def running(self) -> bool:
+        """Whether the background capture thread is active."""
+        return self._running
+
+    def ensure_streaming(self):
+        """Start the background capture thread if it isn't already running.
+
+        Used by headless API/OCR callers so frames come from the self-healing
+        capture loop (which retries reads) instead of a single cold read.
+        """
+        if not self._running:
+            self.start_capture_thread()
+
+    def wait_for_frame(self, timeout: float = 2.0) -> np.ndarray | None:
+        """Block until a frame is available from the capture loop, or timeout."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            frame = self._latest_frame
+            if frame is not None:
+                return frame.copy()
+            time.sleep(0.05)
+        return None
+
     def get_frame_jpeg(self, quality: int = 85) -> tuple[bytes, int, int] | None:
         """Return the latest frame as JPEG bytes with dimensions.
 

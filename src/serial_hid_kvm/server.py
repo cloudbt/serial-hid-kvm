@@ -266,7 +266,15 @@ class ApiDispatcher:
         cap = self._hw.get_capture()
         result = cap.get_frame_jpeg(quality)
         if result is None:
-            # Fall back to single-shot capture
+            # No cached frame yet (e.g. headless API use with no preview window
+            # or browser stream driving the capture loop). Start the
+            # self-healing capture thread and wait briefly for the first frame
+            # rather than a single cold read, which reliably fails on MSMF.
+            cap.ensure_streaming()
+            cap.wait_for_frame(2.0)
+            result = cap.get_frame_jpeg(quality)
+        if result is None:
+            # Last-resort single-shot capture.
             image = cap.capture()
             import io
             buf = io.BytesIO()
