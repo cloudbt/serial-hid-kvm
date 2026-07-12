@@ -13,11 +13,13 @@ import asyncio
 import hashlib
 import hmac
 import importlib.util
+import ipaddress
 import json
 import logging
 import queue
 import re
 import secrets
+import socket
 import ssl
 import time
 from pathlib import Path
@@ -38,6 +40,31 @@ logger = logging.getLogger(__name__)
 # find_spec only checks installability — the actual import happens lazily on
 # the first webrtc_offer, so startup cost is unaffected.
 _WEBRTC_AVAILABLE = importlib.util.find_spec("aiortc") is not None
+
+
+def _is_private_address(ip: str) -> bool:
+    """Whether *ip* is loopback / LAN / link-local (vs. a public address).
+
+    Drives the per-connection LAN/WAN tuning split: LAN clients keep the
+    original loopback-tuned behaviour (fixed fps, max quality, zero jitter
+    buffer, always-on audio), WAN clients get the adaptive treatment.
+    Unparseable addresses are treated as WAN — the safe direction.
+    """
+    try:
+        addr = ipaddress.ip_address(ip.split("%")[0])
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_loopback or addr.is_link_local
+
+
+# WAN stream tuning (per-connection; LAN connections are unaffected).
+_WAN_CREDITS = 2            # max unacked JPEG frames in flight
+_WAN_FPS_CAP = 30           # WAN JPEG target fps (never above web_fps)
+_WAN_QUALITY_MIN = 25       # adaptive JPEG quality floor
+_WAN_QUALITY_CAP = 80       # adaptive JPEG quality ceiling (≤ web_quality)
+_WAN_ACK_RESET_S = 5.0      # assume acks lost after this long at full credit
+_WAN_RTC_FPS_CAP = 30       # WAN H264 default fps (never above webrtc_fps)
+_WAN_RTC_START = 4_000_000  # WAN H264 starting bitrate (bits/s)
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +204,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#1a1a2e;font-family:
 #toolbar button{background:#0f3460;border:1px solid #1a1a5e;color:#e0e0e0;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px}
 #toolbar button:hover{background:#1a4a8a}
 #toolbar button:active{background:#0a2a50}
+#toolbar select{background:#0f3460;border:1px solid #1a1a5e;color:#e0e0e0;padding:4px 6px;border-radius:4px;cursor:pointer;font-size:13px}
 #status{margin-left:auto;font-size:12px;color:#8888aa}
 #fps{font-size:12px;color:#8888aa;min-width:70px;text-align:right}
 #container{display:flex;align-items:center;justify-content:center;width:100%;height:calc(100% - 36px);background:#0a0a1a;overflow:auto;cursor:none;outline:none}
@@ -216,6 +244,13 @@ body.tb-hidden #container{height:100%}
   <button id="btnCursor" title="Toggle local cursor visibility">Cursor</button>
   <button id="btnScale" title="Toggle 1:1 / Fit scaling">Fit</button>
   <button id="btnRtc" title="Low-latency H.264 video over WebRTC (server keeps the capture device, so OCR/MCP stay available)">H264</button>
+  <select id="rtcQuality" title="H264 quality preset — Auto picks 16M/60 on LAN and 4M/30 for remote viewers">
+    <option value="auto">Auto</option>
+    <option value="16000000/60">16M/60</option>
+    <option value="8000000/30">8M/30</option>
+    <option value="4000000/30">4M/30</option>
+    <option value="2000000/30">2M/30</option>
+  </select>
   <button id="btnDirect" title="Direct GPU video straight from the capture card (smoothest; uses this PC's device)">Direct</button>
   <button id="btnFs" title="Toggle fullscreen">Fullscreen</button>
   <span id="status">Connecting…</span>
@@ -249,6 +284,13 @@ let hintTimer = null;
 let ws = null;
 let frameCount = 0;
 let lastFpsTime = performance.now();
+
+// LAN = this page reaches the server via a private/loopback address.
+// Several behaviours differ for remote (WAN) viewers — jitter buffer,
+// frame acks, audio default — and the server makes the same LAN/WAN call
+// from its side using the connection's source address.
+const IS_LAN = isPrivateHost(location.hostname);
+let adaptiveAck = false;   // server asked us to ack frames (hello.adaptive)
 
 // Direct (native) video mode: the browser opens the capture card itself via
 // getUserMedia and renders a real <video> element — same path the official app
@@ -360,8 +402,11 @@ function connect() {
       const type = view[0];
       const payload = ev.data.slice(1);
       if (type === 1) {
-        // Video frame (JPEG) — hand to the drop-stale renderer
+        // Video frame (JPEG) — hand to the drop-stale renderer.  On the
+        // WAN-adaptive stream, ack receipt so the server's credit pacing
+        // knows what the link actually delivered.
         queueFrame(payload);
+        if (adaptiveAck) wsSend({type: "frame_ack"});
       } else if (type === 2) {
         // Audio chunk (PCM int16 LE)
         feedAudio(payload);
@@ -375,6 +420,7 @@ function connect() {
         else if (msg.type === "auth_failed") { onAuthFailed(msg); }
         else if (msg.type === "hello") {
           checkBuild(msg.build);
+          adaptiveAck = !!msg.adaptive;
           if (msg.webrtc === false) {
             const b = document.getElementById("btnRtc");
             b.disabled = true;
@@ -744,8 +790,18 @@ registerProcessor("p", P);
 
 function setupAudioConfig(cfg) {
   audioCfg = cfg;
-  document.getElementById("btnAudio").style.display = "";
-  if (audioOn) enableAudioPlayback();   // default-on, no manual click needed
+  const btn = document.getElementById("btnAudio");
+  btn.style.display = "";
+  // The server tells us the subscription state it started this client
+  // with: LAN clients get the always-on feed (original behaviour), WAN
+  // clients start unsubscribed to keep ~1.5 Mbps of PCM off the uplink.
+  audioOn = cfg.on !== false;
+  if (audioOn) {
+    enableAudioPlayback();   // default-on, no manual click needed
+  } else {
+    btn.textContent = "\u{1f507} Audio";
+    btn.classList.remove("active");
+  }
 }
 
 // Start speaker playback and reflect the on-state on the button. Browsers block
@@ -807,6 +863,13 @@ document.getElementById("btnAudio").addEventListener("click", async () => {
   if (audioCtx.state === "suspended") await audioCtx.resume();
   audioOn = !audioOn;
   if (playGain) playGain.gain.value = audioOn ? 1 : 0;
+  // Remote viewers toggle the PCM feed itself so a muted stream costs no
+  // uplink; while recording, the feed must keep flowing for the recorder
+  // (LAN keeps the always-on feed, mute is just a local gain).
+  if (!IS_LAN) {
+    if (audioOn) wsSend({type: "audio", on: true});
+    else if (!recording) wsSend({type: "audio", on: false});
+  }
   btn.textContent = (audioOn ? "\u{1f50a}" : "\u{1f507}") + " Audio";
   btn.classList.toggle("active", audioOn);
   container.focus();
@@ -857,7 +920,10 @@ async function startRecording() {
   }
   // Video from the active display (canvas in stream mode, <video> in direct).
   recStream = captureDisplayStream();
-  // Mix in audio if available.
+  // Mix in audio if available.  Remote viewers may have the PCM feed
+  // unsubscribed (muted) — turn it on for the recorder; speaker playback
+  // stays muted because playGain is untouched.
+  if (!IS_LAN && audioCfg && !audioOn) wsSend({type: "audio", on: true});
   await ensureAudioForRecording();
   if (recDest) {
     for (const t of recDest.stream.getAudioTracks()) recStream.addTrack(t);
@@ -913,6 +979,8 @@ function stopRecording() {
   recording = false;
   clearInterval(recTimer);
   recTimer = null;
+  // Drop the recorder-only PCM subscription again (remote viewers).
+  if (!IS_LAN && audioCfg && !audioOn) wsSend({type: "audio", on: false});
   try { mediaRecorder.stop(); } catch (e) {}
   if (recStream) {
     for (const t of recStream.getVideoTracks()) t.stop();
@@ -1145,10 +1213,15 @@ async function enableRtc() {
       setTimeout(() => rej(new Error("timed out")), 30000);
     });
     pc.ontrack = (ev) => {
-      // Minimise the receive-side buffer — this is a loopback link.
+      // Minimise the receive-side buffer on loopback/LAN links only.
+      // Across the internet, jitter is real: forcing a zero buffer turns
+      // every delivery wobble into a visible stutter, so remote viewers
+      // keep the browser's adaptive jitter buffer.
       try {
-        if ("jitterBufferTarget" in ev.receiver) ev.receiver.jitterBufferTarget = 0;
-        if ("playoutDelayHint" in ev.receiver) ev.receiver.playoutDelayHint = 0;
+        if (IS_LAN) {
+          if ("jitterBufferTarget" in ev.receiver) ev.receiver.jitterBufferTarget = 0;
+          if ("playoutDelayHint" in ev.receiver) ev.receiver.playoutDelayHint = 0;
+        }
       } catch (e) {}
       video.srcObject = (ev.streams && ev.streams[0])
         ? ev.streams[0] : new MediaStream([ev.track]);
@@ -1168,7 +1241,18 @@ async function enableRtc() {
     };
     await pc.setLocalDescription(await pc.createOffer());
     await iceComplete(pc);
-    wsSend({type: "webrtc_offer", sdp: pc.localDescription.sdp, gen: _rtcGen});
+    // The quality preset rides in the offer: "auto" lets the server pick
+    // (LAN: configured fps/bitrate; WAN: 30 fps / 4 Mbps start with free
+    // REMB adaptation), explicit presets set the cap/fps directly.
+    const offerMsg = {type: "webrtc_offer", sdp: pc.localDescription.sdp,
+                      gen: _rtcGen};
+    const preset = document.getElementById("rtcQuality").value;
+    if (preset !== "auto") {
+      const parts = preset.split("/");
+      offerMsg.bitrate = parseInt(parts[0], 10);
+      offerMsg.fps = parseInt(parts[1], 10);
+    }
+    wsSend(offerMsg);
     await streamReady;
     _rtcWait = null;
     await video.play().catch(() => {});
@@ -1224,6 +1308,11 @@ function restartRtc() {
 
 document.getElementById("btnRtc").addEventListener("click", () => {
   if (rtcMode) disableRtc(); else enableRtc();
+});
+
+document.getElementById("rtcQuality").addEventListener("change", () => {
+  if (rtcMode) restartRtc();   // renegotiate with the new preset
+  container.focus();
 });
 
 // --- PWA ---
@@ -1391,26 +1480,53 @@ class WebViewerServer:
             html_bytes,
         )
 
+    def _client_is_wan(self, ip: str) -> bool:
+        """Whether this client connects across the public internet.
+
+        WAN clients get the adaptive stream treatment; LAN/loopback clients
+        keep the original latency/quality tuning.  Separate method so tests
+        can override the classification.
+        """
+        return not _is_private_address(ip)
+
     async def _handle_client(self, ws):
         """Handle a single WebSocket client: stream frames + process input."""
         self._clients.add(ws)
         addr = ws.remote_address
         ip = f"{addr[0]}:{addr[1]}" if addr else "unknown"
+        wan = self._client_is_wan(addr[0]) if addr else True
         ua = getattr(ws, "_kvm_user_agent", "")
         ua_short = ua[:120] + "…" if len(ua) > 120 else ua
-        msg = f"Web client connected from {ip} ({len(self._clients)} total)"
+        msg = (f"Web client connected from {ip} "
+               f"({'WAN' if wan else 'LAN'}, {len(self._clients)} total)")
         if ua_short:
             msg += f"  UA: {ua_short}"
         logger.info(msg)
+
+        # Disable Nagle so small writes (input echoes, audio chunks, control
+        # messages) aren't batched behind an unacked segment — on a WAN RTT
+        # that batching is a visible latency wobble.  websockets' asyncio
+        # implementation does not set this itself.
+        try:
+            sock = ws.transport.get_extra_info("socket")
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
 
         # Per-client stream state.  "event" gates _send_frames so the client
         # can pause the server stream (e.g. when using direct/native video).
         # "webrtc" pauses JPEG frames while the same frames flow over a
         # WebRTC peer connection instead (device stays with the server).
+        # "wan" selects the adaptive JPEG stream + on-demand audio;
+        # "inflight"/"ack_event" are its frame-credit bookkeeping and
+        # "audio_queue"/"audio_event" the dynamic audio subscription.
         state = {"stream": False, "event": asyncio.Event(),
-                 "webrtc": False, "rtc_session": None}
+                 "webrtc": False, "rtc_session": None,
+                 "wan": wan,
+                 "inflight": 0, "ack_event": asyncio.Event(),
+                 "audio_queue": None, "audio_event": asyncio.Event()}
 
-        audio_queue = None
         loop = asyncio.get_running_loop()
         try:
             # Auth gate: when a password is configured, nothing happens (no
@@ -1425,10 +1541,13 @@ class WebViewerServer:
 
             # Frontend fingerprint: lets an open viewer auto-reload when the
             # server has been restarted with changed HTML/JS.  "webrtc" tells
-            # the client whether the H264 (WebRTC) mode is available.
+            # the client whether the H264 (WebRTC) mode is available;
+            # "adaptive" tells a WAN client to ack received frames so the
+            # credit-based stream can pace itself.
             await ws.send(json.dumps({
                 "type": "hello", "build": _BUILD_ID,
                 "webrtc": _WEBRTC_AVAILABLE,
+                "adaptive": wan,
             }))
 
             # Tell the client which capture device the server uses, so direct
@@ -1440,22 +1559,28 @@ class WebViewerServer:
                 "type": "capture_device", "label": self._cap_label,
             }))
 
-            # Notify client about audio availability
+            # Notify client about audio availability.  LAN clients are
+            # subscribed immediately (original always-on behaviour); WAN
+            # clients start unsubscribed — uncompressed PCM is ~1.5 Mbps
+            # that would compete with video on the uplink — and opt in
+            # with an {"type": "audio", "on": true} message.
             if self._audio is not None:
-                audio_queue = self._audio.subscribe()
+                if not wan:
+                    self._set_audio(state, True)
                 await ws.send(json.dumps({
                     "type": "audio_config",
                     "sampleRate": self._audio.samplerate,
                     "channels": self._audio.channels,
+                    "on": not wan,
                 }))
 
             tasks = [
                 asyncio.create_task(self._send_frames(ws, state)),
                 asyncio.create_task(self._recv_input(ws, state)),
             ]
-            if audio_queue is not None:
+            if self._audio is not None:
                 tasks.append(asyncio.create_task(
-                    self._send_audio(ws, audio_queue)))
+                    self._send_audio(ws, state)))
             done, pending = await asyncio.wait(
                 tasks, return_when=asyncio.FIRST_COMPLETED,
             )
@@ -1472,8 +1597,7 @@ class WebViewerServer:
                 if not t.cancelled():
                     t.exception()
         finally:
-            if audio_queue is not None and self._audio is not None:
-                self._audio.unsubscribe(audio_queue)
+            self._set_audio(state, False)
             self._clients.discard(ws)
             await self._stop_webrtc(state)
             await self._release_stream(state)
@@ -1701,10 +1825,14 @@ class WebViewerServer:
                 state["webrtc"] = False
                 self._update_frame_gate(state)
 
+        fps, cap, start, floor = self._webrtc_params(
+            self._config, state["wan"], ev)
         session = WebRtcSession(
             self._hw.get_capture(),
-            fps=self._config.webrtc_fps,
-            bitrate=self._config.webrtc_bitrate,
+            fps=fps,
+            bitrate=cap,
+            start_bitrate=start,
+            min_bitrate=floor,
             on_closed=on_closed,
         )
         try:
@@ -1724,8 +1852,45 @@ class WebViewerServer:
             "type": "webrtc_answer", "sdp": answer, "gen": gen,
         }))
         logger.info(
-            f"WebRTC session established ({self._config.webrtc_fps} fps, "
-            f"{self._config.webrtc_bitrate // 1000} kbps target)")
+            f"WebRTC session established "
+            f"({'WAN' if state['wan'] else 'LAN'}, {fps} fps, "
+            f"start {start // 1000} kbps, cap {cap // 1000} kbps)")
+
+    @staticmethod
+    def _webrtc_params(config, wan: bool, ev: dict
+                       ) -> tuple[int, int, int, int | None]:
+        """Resolve ``(fps, bitrate_cap, start_bitrate, min_bitrate)`` for an offer.
+
+        LAN: configured fps/bitrate with a floor at half the cap (REMB dips
+        would blur desktop text).  WAN: 30 fps / 4 Mbps start with NO floor,
+        so REMB congestion feedback can settle wherever the uplink allows.
+        An explicit client preset ("bitrate"/"fps" in the offer message,
+        from the toolbar quality selector) overrides the defaults but is
+        clamped to the configured maxima.
+        """
+        fps_max = config.webrtc_fps
+        cap_max = config.webrtc_bitrate
+
+        req_fps = ev.get("fps")
+        req_bitrate = ev.get("bitrate")
+
+        if isinstance(req_fps, (int, float)) and req_fps > 0:
+            fps = int(max(5, min(req_fps, fps_max)))
+        else:
+            fps = min(fps_max, _WAN_RTC_FPS_CAP) if wan else fps_max
+
+        if isinstance(req_bitrate, (int, float)) and req_bitrate > 0:
+            cap = int(max(200_000, min(req_bitrate, cap_max)))
+        else:
+            cap = cap_max
+
+        if wan:
+            start = min(_WAN_RTC_START, cap)
+            floor = None
+        else:
+            start = cap
+            floor = cap // 2
+        return fps, cap, start, floor
 
     async def _stop_webrtc(self, state: dict):
         """Close this client's WebRTC session (if any) and resume JPEG.
@@ -1774,7 +1939,14 @@ class WebViewerServer:
         return ""
 
     async def _send_frames(self, ws, state: dict):
-        """Stream JPEG frames to the client at configured FPS."""
+        """Stream JPEG frames: fixed-pace for LAN, adaptive for WAN."""
+        if state["wan"]:
+            await self._send_frames_wan(ws, state)
+        else:
+            await self._send_frames_lan(ws, state)
+
+    async def _send_frames_lan(self, ws, state: dict):
+        """Stream JPEG frames to the client at configured FPS (original)."""
         fps = self._config.web_fps
         quality = self._config.web_quality
         interval = 1.0 / fps
@@ -1807,14 +1979,123 @@ class WebViewerServer:
                 # Fell behind; reset the schedule to avoid a catch-up burst.
                 next_t = loop.time()
 
-    async def _send_audio(self, ws, audio_queue: queue.Queue):
-        """Stream PCM audio chunks to the client."""
+    async def _send_frames_wan(self, ws, state: dict):
+        """Credit-paced, quality-adaptive JPEG stream for WAN clients.
+
+        Two things make the fixed-pace LAN loop miserable across the
+        internet: frames pile up in TCP buffers (bufferbloat — the client
+        drops stale frames, but only after they crossed the link), and the
+        configured fps/quality assume LAN bandwidth.
+
+        - Credits: at most ``_WAN_CREDITS`` frames are unacknowledged at a
+          time; the client acks every received frame (``hello.adaptive``
+          told it to).  In-flight data stays bounded regardless of OS
+          socket buffering, so added latency is ~one frame transfer and the
+          send rate automatically tracks what the link actually delivers.
+        - Quality: achieved fps over a sliding window drives the JPEG
+          quality down when the link falls behind (cheaper frames preserve
+          motion) and back up when it keeps up.
+        """
+        target_fps = min(self._config.web_fps, _WAN_FPS_CAP)
+        interval = 1.0 / target_fps
+        q_hi = min(self._config.web_quality, _WAN_QUALITY_CAP)
+        quality = min(q_hi, 60)  # modest start; adapts both ways from here
+        capture = self._hw.get_capture()
+        loop = asyncio.get_running_loop()
+
+        window_start = loop.time()
+        window_sent = 0
+        next_t = loop.time()
+        while True:
+            # Pause while the client is in direct/H264 mode.
+            if not state["event"].is_set():
+                await state["event"].wait()
+                next_t = loop.time()
+
+            # Credit gate: wait until the client acked in-flight frames.
+            # If acks stop entirely (stalled link, tab in background),
+            # reset after a timeout so the stream can never freeze forever.
+            credit_deadline = loop.time() + _WAN_ACK_RESET_S
+            while state["inflight"] >= _WAN_CREDITS:
+                state["ack_event"].clear()
+                if state["inflight"] < _WAN_CREDITS:
+                    break  # ack raced the clear
+                remaining = credit_deadline - loop.time()
+                if remaining <= 0:
+                    state["inflight"] = 0
+                    break
+                try:
+                    await asyncio.wait_for(
+                        state["ack_event"].wait(), remaining)
+                except asyncio.TimeoutError:
+                    state["inflight"] = 0
+                    break
+
+            result = await loop.run_in_executor(
+                None, capture.get_frame_jpeg, quality, True)
+            if result is not None:
+                jpeg_bytes, _w, _h = result
+                try:
+                    await ws.send(b"\x01" + jpeg_bytes)
+                except websockets.ConnectionClosed:
+                    break
+                state["inflight"] += 1
+                window_sent += 1
+
+            # Quality controller: evaluate every ~2 s.
+            now = loop.time()
+            elapsed = now - window_start
+            if elapsed >= 2.0:
+                achieved = window_sent / elapsed
+                if achieved < target_fps * 0.7 and quality > _WAN_QUALITY_MIN:
+                    quality = max(_WAN_QUALITY_MIN, quality - 10)
+                    logger.debug(
+                        f"WAN stream {achieved:.1f}/{target_fps} fps, "
+                        f"quality -> {quality}")
+                elif achieved >= target_fps * 0.95 and quality < q_hi:
+                    quality = min(q_hi, quality + 5)
+                window_start = now
+                window_sent = 0
+
+            next_t += interval
+            delay = next_t - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            else:
+                next_t = loop.time()
+
+    def _set_audio(self, state: dict, on: bool):
+        """Subscribe/unsubscribe this client's dynamic audio feed.
+
+        While unsubscribed no PCM is queued for (or sent to) the client at
+        all — that's the WAN bandwidth saving, not just a client-side mute.
+        LAN clients are subscribed at connect and stay subscribed (their
+        mute is a local gain, so recordings keep audio — original
+        behaviour); WAN clients toggle via {"type": "audio"} messages.
+        """
+        if self._audio is None:
+            return
+        if on and state["audio_queue"] is None:
+            state["audio_queue"] = self._audio.subscribe()
+            state["audio_event"].set()
+        elif not on and state["audio_queue"] is not None:
+            q = state["audio_queue"]
+            state["audio_queue"] = None
+            state["audio_event"].clear()
+            self._audio.unsubscribe(q)
+
+    async def _send_audio(self, ws, state: dict):
+        """Stream PCM audio chunks to the client while it is subscribed."""
         loop = asyncio.get_running_loop()
         while True:
+            audio_queue = state["audio_queue"]
+            if audio_queue is None:
+                await state["audio_event"].wait()
+                continue
             chunk = await loop.run_in_executor(
                 None, self._get_audio_chunk, audio_queue
             )
-            if chunk is not None:
+            if chunk is not None and state["audio_queue"] is audio_queue:
                 try:
                     await ws.send(b"\x02" + chunk)
                 except websockets.ConnectionClosed:
@@ -1928,6 +2209,19 @@ class WebViewerServer:
                 elif ev_type == "webrtc_stop":
                     logger.info("webrtc_stop received")
                     await self._stop_webrtc(state)
+                    continue
+
+                elif ev_type == "frame_ack":
+                    # WAN adaptive stream: one in-flight credit returned.
+                    if state["inflight"] > 0:
+                        state["inflight"] -= 1
+                    state["ack_event"].set()
+                    continue
+
+                elif ev_type == "audio":
+                    # Dynamic audio subscription; while off, no PCM is sent
+                    # at all (saves ~1.5 Mbps of uplink for WAN clients).
+                    self._set_audio(state, bool(ev.get("on")))
                     continue
 
                 elif ev_type == "rec_start":

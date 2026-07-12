@@ -8,7 +8,15 @@ OCR, MCP) therefore keep working while the viewer streams.
 
 Signaling rides on the existing web-viewer WebSocket (``webrtc_offer`` /
 ``webrtc_answer`` / ``webrtc_stop`` JSON messages, see _web_viewer.py).
-Everything runs on 127.0.0.1 host candidates — no STUN/TURN needed.
+On loopback/LAN links host candidates suffice; remote (WAN) viewers rely
+on STUN server-reflexive candidates (aiortc defaults to Google STUN).
+
+LAN and WAN sessions are tuned differently (see _web_viewer.py, which
+picks the numbers per connection): LAN starts at the configured bitrate
+with a floor at half of it — REMB dips would otherwise blur desktop text —
+while WAN starts low and leaves REMB free to drop the rate to whatever the
+uplink actually sustains, because a floored rate on a congested link turns
+into packet loss and keyframe-request freezes.
 
 Requires the optional aiortc dependency::
 
@@ -47,23 +55,55 @@ def _h264_available() -> bool:
     return _h264_encoder_ok
 
 
-def _raise_encoder_bitrate_caps(bitrate: int):
-    """Lift aiortc's built-in video encoder bitrate caps to *bitrate*.
+def _install_per_encoder_bitrate_clamps():
+    """Patch aiortc encoders so bitrate bounds can be set per instance.
 
-    aiortc clamps H.264 to 3 Mbps and VP8 to 1.5 Mbps, far too low for
-    crisp 1080p60 desktop content on a loopback/LAN link.  The caps are
-    module-level constants read at runtime by the ``target_bitrate``
-    setter (which REMB feedback drives), so raising them here both starts
-    the encoder at *bitrate* and lets congestion feedback stay there.
+    aiortc clamps ``target_bitrate`` (driven by browser REMB congestion
+    feedback) to *module-level* constants, which are process-global.  A
+    LAN session wants a high floor (transient REMB dips visibly blur
+    desktop text while scrolling), while a WAN session must let REMB drop
+    the rate to what the uplink actually carries — a floored rate on a
+    congested link means sustained packet loss and PLI/keyframe freezes.
+
+    The patched setter honours ``_kvm_min_bitrate`` / ``_kvm_max_bitrate``
+    attributes stamped onto the encoder instance by
+    :meth:`WebRtcSession._stamp_encoder`; instances without them keep the
+    stock module-constant clamping.  Idempotent.
+    """
+    from aiortc.codecs import h264, vpx
+    for cls in (h264.H264Encoder, vpx.Vp8Encoder):
+        prop = cls.target_bitrate
+        if getattr(prop.fset, "_kvm_patched", False):
+            continue
+        orig_fset = prop.fset
+
+        def fset(self, bitrate: int, _orig=orig_fset):
+            lo = getattr(self, "_kvm_min_bitrate", None)
+            hi = getattr(self, "_kvm_max_bitrate", None)
+            if lo is not None:
+                bitrate = max(lo, bitrate)
+            if hi is not None:
+                bitrate = min(hi, bitrate)
+            _orig(self, bitrate)
+
+        fset._kvm_patched = True
+        setattr(cls, "target_bitrate", property(prop.fget, fset))
+
+
+def _set_global_bitrate_bounds(start: int, cap: int):
+    """Adjust aiortc's module-level bitrate constants for new encoders.
+
+    aiortc's stock caps (H.264 3 Mbps / VP8 1.5 Mbps) are far too low for
+    desktop content, so MAX is raised to at least *cap* (monotonically —
+    concurrent sessions never shrink each other's ceiling).  DEFAULT is
+    the rate an encoder starts at before :meth:`WebRtcSession._stamp_encoder`
+    applies the per-session bounds; MIN is left at aiortc's stock values so
+    per-instance floors (or their absence, for WAN) stay in charge.
     """
     from aiortc.codecs import h264, vpx
     for mod in (h264, vpx):
-        mod.DEFAULT_BITRATE = bitrate
-        mod.MAX_BITRATE = max(bitrate, mod.MAX_BITRATE)
-        # Floor the rate controller as well: transient REMB dips from the
-        # browser would otherwise crater quality (visible as blur during
-        # scrolling), and every >10% target change rebuilds the encoder.
-        mod.MIN_BITRATE = max(mod.MIN_BITRATE, bitrate // 2)
+        mod.DEFAULT_BITRATE = start
+        mod.MAX_BITRATE = max(cap, mod.MAX_BITRATE)
 
 
 class CaptureVideoTrack(MediaStreamTrack):
@@ -142,15 +182,33 @@ class CaptureVideoTrack(MediaStreamTrack):
 
 
 class WebRtcSession:
-    """One peer connection streaming the capture to one viewer client."""
+    """One peer connection streaming the capture to one viewer client.
 
-    def __init__(self, capture, fps: int, bitrate: int, on_closed=None):
-        _raise_encoder_bitrate_caps(bitrate)
+    Args:
+        capture: shared ScreenCapture.
+        fps: stream frame rate for this session.
+        bitrate: bitrate ceiling (REMB may not push above it).
+        start_bitrate: encoder starting rate (defaults to *bitrate*).
+        min_bitrate: floor for REMB dips; ``None`` leaves aiortc's stock
+            minimum so congestion feedback can drop the rate freely (WAN).
+        on_closed: callback fired once when the peer connection dies.
+    """
+
+    def __init__(self, capture, fps: int, bitrate: int,
+                 start_bitrate: int | None = None,
+                 min_bitrate: int | None = None,
+                 on_closed=None):
+        _install_per_encoder_bitrate_clamps()
+        self._cap_bitrate = bitrate
+        self._start_bitrate = start_bitrate or bitrate
+        self._min_bitrate = min_bitrate
+        _set_global_bitrate_bounds(self._start_bitrate, bitrate)
         self._capture = capture
         self._fps = fps
         self._pc: RTCPeerConnection | None = None
         self._closed = False
         self._on_closed = on_closed
+        self._stamp_task: asyncio.Task | None = None
 
     async def handle_offer(self, sdp: str) -> str:
         """Negotiate against the browser's offer; returns the answer SDP."""
@@ -171,9 +229,36 @@ class WebRtcSession:
         self._prefer_h264(pc, sender)
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
         await pc.setLocalDescription(await pc.createAnswer())
+        self._stamp_task = asyncio.create_task(self._stamp_encoder(sender))
         # aiortc completes ICE gathering before returning, so the SDP
         # already contains the host candidates (non-trickle signaling).
         return pc.localDescription.sdp
+
+    async def _stamp_encoder(self, sender):
+        """Apply this session's bitrate bounds to its (lazy) encoder.
+
+        The sender creates its encoder on the first encoded frame, so poll
+        for it briefly and then stamp the per-instance bounds that the
+        patched ``target_bitrate`` setter honours, plus the starting rate.
+        Until the stamp lands, the encoder runs at the module DEFAULT set
+        in ``_set_global_bitrate_bounds`` — a few frames at most.
+        """
+        for _ in range(600):  # up to ~30 s (ICE + first frame can be slow)
+            if self._closed:
+                return
+            enc = getattr(sender, "_RTCRtpSender__encoder", None)
+            if enc is not None and hasattr(enc, "target_bitrate"):
+                if self._min_bitrate is not None:
+                    enc._kvm_min_bitrate = self._min_bitrate
+                enc._kvm_max_bitrate = self._cap_bitrate
+                enc.target_bitrate = self._start_bitrate
+                logger.info(
+                    "WebRTC encoder bounds: start "
+                    f"{self._start_bitrate // 1000} kbps, "
+                    f"floor {(self._min_bitrate or 0) // 1000} kbps, "
+                    f"cap {self._cap_bitrate // 1000} kbps")
+                return
+            await asyncio.sleep(0.05)
 
     @staticmethod
     def _prefer_h264(pc: RTCPeerConnection, sender):

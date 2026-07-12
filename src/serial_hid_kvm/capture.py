@@ -483,16 +483,21 @@ class ScreenCapture:
             time.sleep(0.05)
         return None
 
-    def get_frame_jpeg(self, quality: int = 85) -> tuple[bytes, int, int] | None:
+    def get_frame_jpeg(self, quality: int = 85,
+                       force_reencode: bool = False) -> tuple[bytes, int, int] | None:
         """Return the latest frame as JPEG bytes with dimensions.
 
         When MJPEG passthrough is active, returns the raw JPEG from the
-        device without re-encoding (quality parameter is ignored).
+        device without re-encoding (quality parameter is ignored) — unless
+        *force_reencode* is set, which always encodes at *quality* (used by
+        the web viewer's WAN-adaptive stream, where quality is the knob
+        that keeps a slow uplink usable).
 
         Returns:
             (jpeg_bytes, width, height) or None if no frame available.
         """
-        if self._mjpeg_passthrough and self._latest_jpeg is not None:
+        if (not force_reencode and self._mjpeg_passthrough
+                and self._latest_jpeg is not None):
             frame = self._latest_frame
             if frame is None:
                 return None

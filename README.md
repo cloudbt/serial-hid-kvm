@@ -232,7 +232,11 @@ The browser warns about the self-signed certificate — after accepting, traffic
 
 ### Remote-use notes
 
-- The default JPEG/WebSocket video works over all of the above. The **H264** (WebRTC) mode also works remotely in many networks — when the page is served from a non-private host, the viewer adds a public STUN server for NAT traversal — but strict NATs or UDP-blocking firewalls can defeat it; if H264 fails, stay on the default stream.
+The viewer automatically applies different tuning per connection — LAN/localhost clients keep the maximum-quality low-latency behaviour, while clients connecting from a public address get an adaptive treatment (both ends classify the link by IP; no configuration needed, and one server instance serves both kinds simultaneously):
+
+- **Default (JPEG) stream**: remote clients are credit-paced — at most 2 frames in flight, acknowledged by the browser — so latency stays at roughly one frame transfer time regardless of how slow the uplink is (no buffer-bloat), and the JPEG quality steps down/up automatically to hold the frame rate (target 30 fps). LAN clients keep the fixed `--web-fps` / `--web-quality` stream.
+- **H264 (WebRTC)**: works remotely in many networks (the viewer adds a public STUN server when the page is on a non-private host; strict NATs or UDP-blocking firewalls can still defeat it — then use the default stream). Remote sessions start at 4 Mbps / 30 fps and let the browser's congestion feedback (REMB) move the rate to whatever the link sustains; LAN sessions keep the full `--webrtc-bitrate` with a floor at half of it for crisp text. The toolbar quality selector (`Auto`, `16M/60` … `2M/30`) next to the H264 button overrides this per session.
+- **Audio**: remote clients don't receive the ~1.5 Mbps uncompressed PCM feed until they click Unmute (starting a recording subscribes it temporarily so recordings still capture audio). LAN clients keep the always-on feed.
 - **Direct** mode is local-only by design (the browser opens the capture card itself) — remote viewers can't use it.
 - Never forward the API port (9329) — it has no authentication. Use an SSH tunnel or VPN instead.
 
@@ -421,6 +425,7 @@ Then open `http://localhost:9330` in a browser. To allow access from other machi
 - FPS counter
 - Auto-reconnect on WebSocket disconnect (2-second interval)
 - Password login overlay when the server sets `--web-password`; the session token survives reconnects and tab reloads ("Remember on this device" keeps it across browser restarts until the server restarts)
+- Automatic LAN/WAN tuning per connection: remote (public-IP) viewers get a credit-paced, quality-adaptive JPEG stream, WAN-friendly H264 defaults with an H264 quality selector in the toolbar, and on-demand audio — LAN viewers keep the original maximum-quality low-latency behaviour (see [Remote-use notes](#remote-use-notes))
 - Dark theme, responsive canvas with aspect ratio preservation
 - Focus-loss detection: all keys released when canvas loses focus (no stuck keys)
 - Audio streaming with Unmute/Mute button (when `--audio-device` is set)

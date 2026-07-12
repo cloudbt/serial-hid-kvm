@@ -21,7 +21,7 @@ class _DummyCapture:
     def close(self):
         pass
 
-    def get_frame_jpeg(self, quality):
+    def get_frame_jpeg(self, quality, force_reencode=False):
         return None
 
 
