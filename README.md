@@ -25,7 +25,7 @@ flowchart LR
 
 - **Interactive preview window** — see the target screen in real-time, type and click as if you were sitting in front of it
 - **Full keyboard capture** (Windows) — Win32 low-level hook captures all keys including Win, Alt+Tab when the preview window is focused (Ctrl+Alt+Del via Ctrl+Alt+End)
-- **Web-based remote viewer** — browser-based remote desktop with keyboard/mouse over WebSocket (`--web`)
+- **Web-based remote viewer** — browser-based remote desktop with keyboard/mouse over WebSocket (`--web`); optional password login (`--web-password`) and native TLS (`--web-tls-cert`) for remote / public internet deployment
 - **API server** (`--api`) — JSON Lines protocol over TCP socket for programmatic automation from any language; also available as an MCP server via [mcp-serial-hid-kvm](https://github.com/sunasaji/mcp-serial-hid-kvm) or as a CLI via [cli-serial-hid-kvm](https://github.com/sunasaji/cli-serial-hid-kvm)
 - **Python client library** — thread-safe client with auto-reconnect for scripting and AI agent integration
 - **Multiple concurrent clients** — one KVM server, many API clients (AI agents, scripts, etc.)
@@ -96,6 +96,9 @@ serial-hid-kvm --headless --api --web
 # Web viewer accessible from LAN  ⚠️ USE WITH CAUTION — see Remote Access and Security
 serial-hid-kvm --headless --web --web-host 0.0.0.0
 
+# Web viewer on the network with password login (see Public Internet Deployment)
+serial-hid-kvm --headless --web --web-host 0.0.0.0 --web-password mypass
+
 # API server accessible from LAN  ⚠️ USE WITH CAUTION — see Remote Access and Security
 serial-hid-kvm --headless --api --api-host 0.0.0.0
 
@@ -122,11 +125,116 @@ By default, only the preview window runs. API server (`--api`, default port 9329
 
 ## Remote Access and Security
 
-The API server and web viewer have **no built-in authentication or TLS**. By default they bind to `127.0.0.1` and are not exposed to the network. Binding to `0.0.0.0` exposes full keyboard/mouse control of the target to anyone who can reach the port. To access remotely, use an external tool rather than binding to `0.0.0.0` directly:
+By default the API server and web viewer bind to `127.0.0.1` and are not exposed to the network.
 
-- **SSH tunnel** — simplest, no extra software: `ssh -L 9330:127.0.0.1:9330 kvm-host`
+The **web viewer** has built-in authentication and TLS for remote use:
+
+- `--web-password PW` (prefer the `SHKVM_WEB_PASSWORD` env var so the password stays out of the process list) — clients must authenticate over the WebSocket before any video, audio, or input flows (the capture device is not even opened for unauthenticated clients). Failed attempts are throttled (1.5 s delay per attempt, 30 s per-IP lockout after 5 failures). After login the browser holds a session token, so WebSocket reconnects and tab reloads re-authenticate silently; restarting the server invalidates all sessions.
+- `--web-tls-cert FILE` / `--web-tls-key FILE` — serve https/wss directly with a PEM certificate/key pair. Alternatively terminate TLS at a reverse proxy or tunnel (see below).
+
+The **API server** (`--api`) has **no authentication** — keep it on `127.0.0.1` and reach it remotely only through:
+
+- **SSH tunnel** — `ssh -L 9329:127.0.0.1:9329 kvm-host`
 - **Tailscale / WireGuard** — VPN-level protection without exposing ports
-- **Caddy / nginx** — reverse proxy with TLS and authentication if needed
+
+To put the web viewer on the public internet, see [Public Internet Deployment](#public-internet-deployment).
+
+## Public Internet Deployment
+
+Goal: open a URL from anywhere on the internet and control the target PC. The KVM host (the PC with the CH9329 + capture dongle) usually sits behind NAT, so pick one of the paths below. The web viewer is plain HTTP + WebSocket on a single port (9330), so any TCP tunnel or reverse proxy works — video, audio, input, and recording all ride the same connection.
+
+**Always set a password first** — a public KVM without one hands full keyboard/mouse control of the target to the whole internet:
+
+```powershell
+# Windows (PowerShell)
+$env:SHKVM_WEB_PASSWORD = "use-a-long-random-password"
+serial-hid-kvm --headless --web
+```
+
+```bash
+# Linux
+SHKVM_WEB_PASSWORD="use-a-long-random-password" serial-hid-kvm --headless --web
+```
+
+### Option A: VPS with a public IP + frp tunnel
+
+If you have a VPS, run [frp](https://github.com/fatedier/frp): `frps` on the VPS, `frpc` on the KVM host. The web viewer keeps its default `127.0.0.1` bind — `frpc` connects to it locally.
+
+`frps.toml` (VPS):
+
+```toml
+bindPort = 7000
+auth.token = "a-long-shared-secret"
+# keep tunnel ports off the public interface if nginx terminates TLS (below)
+# proxyBindAddr = "127.0.0.1"
+```
+
+`frpc.toml` (KVM host):
+
+```toml
+serverAddr = "your-vps-ip"
+serverPort = 7000
+auth.token = "a-long-shared-secret"
+
+[[proxies]]
+name = "kvm-web"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 9330
+remotePort = 9330
+```
+
+Then open `http://your-vps-ip:9330`. For HTTPS, put nginx with a Let's Encrypt certificate in front on the VPS (uncomment `proxyBindAddr` above so only nginx can reach the tunnel port):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name kvm.example.com;
+    ssl_certificate     /etc/letsencrypt/live/kvm.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/kvm.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:9330;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 1d;    # long-lived WebSocket
+    }
+}
+```
+
+### Option B: No VPS — Cloudflare Tunnel
+
+Free, no public IP and no open inbound ports; HTTPS is automatic. Requires a domain managed by Cloudflare. On the KVM host:
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create kvm
+cloudflared tunnel route dns kvm kvm.example.com
+cloudflared tunnel run --url http://127.0.0.1:9330 kvm
+```
+
+Open `https://kvm.example.com` — WebSocket passes through by default. For a second authentication layer (before the request even reaches your machine), add a Cloudflare Access policy to the hostname.
+
+### Option C: Router port forwarding (ISP gives you a public IP)
+
+Forward a router TCP port (e.g. 443) to the KVM host's 9330 and use DDNS if your IP changes. Since there is no proxy to terminate TLS, use the built-in TLS so the password and session never travel in clear text:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+  -keyout key.pem -out cert.pem -subj "/CN=kvm"
+
+SHKVM_WEB_PASSWORD=... serial-hid-kvm --headless --web \
+  --web-host 0.0.0.0 --web-tls-cert cert.pem --web-tls-key key.pem
+```
+
+The browser warns about the self-signed certificate — after accepting, traffic is still fully encrypted. Use a real certificate (Let's Encrypt + DDNS domain) to avoid the warning.
+
+### Remote-use notes
+
+- The default JPEG/WebSocket video works over all of the above. The **H264** (WebRTC) mode also works remotely in many networks — when the page is served from a non-private host, the viewer adds a public STUN server for NAT traversal — but strict NATs or UDP-blocking firewalls can defeat it; if H264 fails, stay on the default stream.
+- **Direct** mode is local-only by design (the browser opens the capture card itself) — remote viewers can't use it.
+- Never forward the API port (9329) — it has no authentication. Use an SSH tunnel or VPN instead.
 
 ## Configuration
 
@@ -156,6 +264,10 @@ Options:
   --web-port PORT           Web viewer port (default: 9330)
   --web-fps FPS             Web viewer frame rate (default: 20)
   --web-quality Q           Web viewer JPEG quality 1-100 (default: 60)
+  --web-password PW         Require a password for the web viewer
+                            (prefer SHKVM_WEB_PASSWORD env var)
+  --web-tls-cert FILE       TLS certificate (PEM) — serve https/wss directly
+  --web-tls-key FILE        TLS private key (PEM) for --web-tls-cert
   --webrtc-fps FPS          WebRTC (H264) stream frame rate (default: 60)
   --webrtc-bitrate BPS      WebRTC (H264) target bitrate in bits/s (default: 16000000)
   --recording-dir DIR       Folder for browser screen recordings (default: ~/Videos)
@@ -205,6 +317,9 @@ All use the `SHKVM_` prefix:
 | `SHKVM_WEB_PORT` | `9330` | Web viewer port |
 | `SHKVM_WEB_FPS` | `20` | Web viewer frame rate |
 | `SHKVM_WEB_QUALITY` | `60` | Web viewer JPEG quality (1-100) |
+| `SHKVM_WEB_PASSWORD` | — | Web viewer password (enables authentication) |
+| `SHKVM_WEB_TLS_CERT` | — | TLS certificate file (PEM) — serve https/wss |
+| `SHKVM_WEB_TLS_KEY` | — | TLS private key file (PEM) |
 | `SHKVM_WEBRTC_FPS` | `60` | WebRTC (H264) stream frame rate |
 | `SHKVM_WEBRTC_BITRATE` | `16000000` | WebRTC (H264) target bitrate in bits/s |
 | `SHKVM_RECORDING_DIR` | `~/Videos` | Folder for browser screen recordings |
@@ -241,6 +356,9 @@ web_host: 127.0.0.1
 web_port: 9330
 web_fps: 20
 web_quality: 60
+web_password: null      # set to require login on the web viewer
+web_tls_cert: null      # PEM cert — serve https/wss directly
+web_tls_key: null       # PEM key
 recording_dir: C:\Users\whz\Videos
 audio_device: null
 autocrop: true
@@ -302,6 +420,7 @@ Then open `http://localhost:9330` in a browser. To allow access from other machi
 - Fullscreen mode
 - FPS counter
 - Auto-reconnect on WebSocket disconnect (2-second interval)
+- Password login overlay when the server sets `--web-password`; the session token survives reconnects and tab reloads ("Remember on this device" keeps it across browser restarts until the server restarts)
 - Dark theme, responsive canvas with aspect ratio preservation
 - Focus-loss detection: all keys released when canvas loses focus (no stuck keys)
 - Audio streaming with Unmute/Mute button (when `--audio-device` is set)

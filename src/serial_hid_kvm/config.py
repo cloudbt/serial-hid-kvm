@@ -53,6 +53,13 @@ class Config:
         self.web_fps: int = 20
         self.web_quality: int = 85
 
+        # Web viewer access control (for non-localhost / public deployment).
+        # web_password: clients must authenticate over the WebSocket before
+        # any video/input flows.  web_tls_cert/key: serve https/wss directly.
+        self.web_password: str | None = None
+        self.web_tls_cert: str | None = None
+        self.web_tls_key: str | None = None
+
         # WebRTC (H264 button in the web viewer; requires aiortc)
         self.webrtc_fps: int = 60
         self.webrtc_bitrate: int = 16_000_000  # bits/s
@@ -84,6 +91,7 @@ _FILE_KEYS = {
     "target_layout", "host_layout", "layouts_dir",
     "api_enabled", "api_host", "api_port",
     "web_enabled", "web_host", "web_port", "web_fps", "web_quality",
+    "web_password", "web_tls_cert", "web_tls_key",
     "webrtc_fps", "webrtc_bitrate",
     "recording_dir",
     "audio_device",
@@ -157,6 +165,9 @@ _ENV_MAP = {
     "SHKVM_WEB_PORT": "web_port",
     "SHKVM_WEB_FPS": "web_fps",
     "SHKVM_WEB_QUALITY": "web_quality",
+    "SHKVM_WEB_PASSWORD": "web_password",
+    "SHKVM_WEB_TLS_CERT": "web_tls_cert",
+    "SHKVM_WEB_TLS_KEY": "web_tls_key",
     "SHKVM_WEBRTC_FPS": "webrtc_fps",
     "SHKVM_WEBRTC_BITRATE": "webrtc_bitrate",
     "SHKVM_RECORDING_DIR": "recording_dir",
@@ -211,6 +222,9 @@ def _apply_args(config: Config, args):
         "web_port": "web_port",
         "web_fps": "web_fps",
         "web_quality": "web_quality",
+        "web_password": "web_password",
+        "web_tls_cert": "web_tls_cert",
+        "web_tls_key": "web_tls_key",
         "webrtc_fps": "webrtc_fps",
         "webrtc_bitrate": "webrtc_bitrate",
         "recording_dir": "recording_dir",

@@ -505,6 +505,15 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Web viewer frame rate (default: 20)")
     parser.add_argument("--web-quality", type=int, metavar="Q",
                         help="Web viewer JPEG quality 1-100 (default: 85)")
+    parser.add_argument("--web-password", type=str, metavar="PW",
+                        help="Require this password to use the web viewer"
+                             " (prefer SHKVM_WEB_PASSWORD to keep it out of"
+                             " the process list)")
+    parser.add_argument("--web-tls-cert", type=str, metavar="FILE",
+                        help="TLS certificate (PEM) — serve the web viewer"
+                             " over https/wss")
+    parser.add_argument("--web-tls-key", type=str, metavar="FILE",
+                        help="TLS private key (PEM) for --web-tls-cert")
     parser.add_argument("--webrtc-fps", type=int, metavar="FPS",
                         help="WebRTC (H264) stream frame rate (default: 60)")
     parser.add_argument("--webrtc-bitrate", type=int, metavar="BPS",

@@ -11,11 +11,14 @@ Usage (integrated into server.py):
 
 import asyncio
 import hashlib
+import hmac
 import importlib.util
 import json
 import logging
 import queue
 import re
+import secrets
+import ssl
 import time
 from pathlib import Path
 
@@ -189,6 +192,16 @@ body.tb-hidden #toolbar{display:none}
 body.tb-hidden #container{height:100%}
 #hint{position:fixed;top:8px;left:50%;transform:translateX(-50%);background:rgba(22,33,62,.92);border:1px solid #0f3460;color:#e0e0e0;padding:4px 12px;border-radius:6px;font-size:12px;z-index:20;opacity:0;transition:opacity .4s;pointer-events:none;white-space:nowrap}
 #hint.show{opacity:1}
+#login{position:fixed;inset:0;background:rgba(10,10,26,.9);display:none;align-items:center;justify-content:center;z-index:30}
+#login.show{display:flex}
+#login form{background:#16213e;border:1px solid #0f3460;border-radius:10px;padding:28px 32px;display:flex;flex-direction:column;gap:12px;min-width:280px}
+#login h1{font-size:16px;font-weight:600;text-align:center}
+#loginPw{background:#0a0a1a;border:1px solid #0f3460;border-radius:4px;color:#e0e0e0;padding:8px 10px;font-size:14px;outline:none}
+#loginPw:focus{border-color:#1a4a8a}
+#login button{background:#0f3460;border:1px solid #1a1a5e;color:#e0e0e0;padding:8px 12px;border-radius:4px;cursor:pointer;font-size:14px}
+#login button:hover{background:#1a4a8a}
+#loginErr{color:#e07070;font-size:12px;min-height:14px}
+#login label{font-size:12px;color:#8888aa;display:flex;align-items:center;gap:6px;user-select:none}
 </style>
 </head>
 <body>
@@ -210,6 +223,13 @@ body.tb-hidden #container{height:100%}
 </div>
 <div id="container" tabindex="0"><canvas id="screen"></canvas><video id="video" playsinline muted style="display:none"></video></div>
 <div id="hint"></div>
+<div id="login"><form id="loginForm">
+  <h1>serial-hid-kvm</h1>
+  <input id="loginPw" type="password" placeholder="Password" autocomplete="current-password">
+  <label><input id="loginRemember" type="checkbox"> Remember on this device</label>
+  <div id="loginErr"></div>
+  <button type="submit">Connect</button>
+</form></div>
 <script>
 "use strict";
 const canvas = document.getElementById("screen");
@@ -252,6 +272,58 @@ function wsSend(obj) {  // control messages, not gated by view-only
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
+// --- Authentication (server started with --web-password) ---
+// The server gates everything behind an "auth" message on the WebSocket.
+// A successful password login yields a reconnect token, stored per-tab in
+// sessionStorage (plus localStorage with "Remember") so reconnects and tab
+// reloads re-authenticate silently.  Tokens die with the server process;
+// when one expires the login overlay reappears.
+const login = document.getElementById("login");
+const loginPw = document.getElementById("loginPw");
+const loginErr = document.getElementById("loginErr");
+const loginRemember = document.getElementById("loginRemember");
+let triedToken = false;   // one silent token attempt per connection
+
+function storedToken() {
+  return sessionStorage.getItem("kvmToken") || localStorage.getItem("kvmToken");
+}
+function storeToken(t) {
+  sessionStorage.setItem("kvmToken", t);
+  if (loginRemember.checked) localStorage.setItem("kvmToken", t);
+}
+function clearToken() {
+  sessionStorage.removeItem("kvmToken");
+  localStorage.removeItem("kvmToken");
+}
+function onAuthRequired() {
+  statusEl.textContent = "Authentication required";
+  const t = storedToken();
+  if (t && !triedToken) {
+    triedToken = true;
+    wsSend({type: "auth", token: t});
+  } else {
+    login.classList.add("show");
+    loginPw.focus();
+  }
+}
+function onAuthOk(msg) {
+  if (msg.token) storeToken(msg.token);
+  login.classList.remove("show");
+  loginErr.textContent = "";
+  loginPw.value = "";
+}
+function onAuthFailed(msg) {
+  if (msg.expired) clearToken();   // stale token → fall back to password
+  else loginErr.textContent = msg.error || "Authentication failed";
+  login.classList.add("show");
+  loginPw.focus();
+}
+document.getElementById("loginForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  loginErr.textContent = "";
+  wsSend({type: "auth", password: loginPw.value});
+});
+
 // --- Auto-reload when the server's frontend changed ---
 // The server sends a fingerprint of its embedded HTML/JS on connect. We record
 // the first one; if a later (reconnected) server reports a different build, the
@@ -271,21 +343,11 @@ function connect() {
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
-    if (directStream) {
-      statusEl.textContent = "Direct video (native)";
-      // A reconnected server starts in stream mode; if we're showing native
-      // video, tell it to release the capture device again.
-      wsSend({type: "stream", on: false});
-    } else if (rtcMode) {
-      // The server-side peer connection died with the old socket or server —
-      // renegotiate a fresh one.
-      restartRtc();
-    } else {
-      statusEl.textContent = "Connected";
-    }
-    // Direct video defaults OFF so the server keeps the capture device and can
-    // share frames with server-side OCR / MCP / capture_frame while the viewer
-    // is open. Click the Direct button to switch to native getUserMedia video.
+    // Session setup (mode restore) happens on the server's "hello", which
+    // arrives after authentication when a password is configured — anything
+    // sent before that would be dropped by the server's auth gate.
+    triedToken = false;
+    statusEl.textContent = "Connecting…";
   };
   ws.onclose = () => {
     statusEl.textContent = "Disconnected — reconnecting…";
@@ -308,13 +370,31 @@ function connect() {
       // Text message (JSON)
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "hello") {
+        if (msg.type === "auth_required") { onAuthRequired(); }
+        else if (msg.type === "auth_ok") { onAuthOk(msg); }
+        else if (msg.type === "auth_failed") { onAuthFailed(msg); }
+        else if (msg.type === "hello") {
           checkBuild(msg.build);
           if (msg.webrtc === false) {
             const b = document.getElementById("btnRtc");
             b.disabled = true;
             b.title = "Server lacks aiortc (pip install serial-hid-kvm[webrtc])";
           }
+          if (directStream) {
+            statusEl.textContent = "Direct video (native)";
+            // A reconnected server starts in stream mode; if we're showing
+            // native video, tell it to release the capture device again.
+            wsSend({type: "stream", on: false});
+          } else if (rtcMode) {
+            // The server-side peer connection died with the old socket or
+            // server — renegotiate a fresh one.
+            restartRtc();
+          } else {
+            statusEl.textContent = "Connected";
+          }
+          // Direct video defaults OFF so the server keeps the capture device
+          // and can share frames with server-side OCR / MCP / capture_frame
+          // while the viewer is open.
         }
         else if (msg.type === "audio_config") { setupAudioConfig(msg); }
         else if (msg.type === "capture_device") { serverCaptureLabel = msg.label || ""; }
@@ -1031,6 +1111,21 @@ function iceComplete(pc) {
   });
 }
 
+// STUN is only useful when the viewer reaches the server across the internet
+// (NAT traversal for the H264 media path; the server side defaults to the
+// same STUN server via aiortc).  Private/local hosts skip it so offline LANs
+// don't sit out the STUN timeout during ICE gathering.
+function isPrivateHost(h) {
+  h = (h || "").replace(/^\[|\]$/g, "").toLowerCase();
+  if (h === "localhost" || h === "::1" || h.endsWith(".local")) return true;
+  if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(h)) return true;
+  if (/^169\.254\./.test(h) || /^fe80:/.test(h) || /^f[cd]/.test(h)) return true;
+  return false;
+}
+const RTC_CONFIG = isPrivateHost(location.hostname) ? {} :
+  {iceServers: [{urls: "stun:stun.l.google.com:19302"}]};
+
 async function enableRtc() {
   if (rtcMode) return;
   const btn = document.getElementById("btnRtc");
@@ -1040,7 +1135,7 @@ async function enableRtc() {
   statusEl.textContent = "Starting H.264 stream…";
   _rtcGen++;                           // new negotiation generation
   try {
-    rtcPc = new RTCPeerConnection();
+    rtcPc = new RTCPeerConnection(RTC_CONFIG);
     const pc = rtcPc;
     pc.addTransceiver("video", {direction: "recvonly"});
     // Generous timeout: on a cold server the first offer can sit queued
@@ -1203,17 +1298,51 @@ class WebViewerServer:
         # a release can never interleave with an open still in flight.
         self._device_lock = asyncio.Lock()
         self._cap_label: str | None = None  # cached capture-device name
+        # Auth state (only used when config.web_password is set): reconnect
+        # tokens issued after a successful password login, and per-IP failed
+        # attempt throttling.  Both live in memory only, so a server restart
+        # invalidates every session.
+        self._auth_tokens: set[str] = set()
+        self._auth_fails: dict[str, tuple[int, float]] = {}
 
     async def start(self):
         host = self._config.web_host
         port = self._config.web_port
+        ssl_ctx = self._build_ssl_context()
         self._server = await websockets.serve(
             self._handle_client,
             host,
             port,
             process_request=self._process_http,
+            ssl=ssl_ctx,
         )
-        logger.info(f"Web viewer listening on http://{host}:{port}")
+        scheme = "https" if ssl_ctx else "http"
+        auth = " (password required)" if self._config.web_password else ""
+        logger.info(f"Web viewer listening on {scheme}://{host}:{port}{auth}")
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            if not self._config.web_password:
+                logger.warning(
+                    "Web viewer is reachable from the network WITHOUT a "
+                    "password — anyone who can connect controls the target. "
+                    "Set --web-password / SHKVM_WEB_PASSWORD.")
+            elif ssl_ctx is None:
+                logger.warning(
+                    "Web viewer password will travel unencrypted (no TLS). "
+                    "Use --web-tls-cert/--web-tls-key or terminate TLS at a "
+                    "reverse proxy / tunnel.")
+
+    def _build_ssl_context(self) -> ssl.SSLContext | None:
+        """Build the TLS context from config, or None for plain HTTP."""
+        cert = self._config.web_tls_cert
+        key = self._config.web_tls_key
+        if not cert and not key:
+            return None
+        if not (cert and key):
+            raise ValueError(
+                "--web-tls-cert and --web-tls-key must be given together")
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+        return ctx
 
     async def stop(self):
         if self._server is not None:
@@ -1284,6 +1413,13 @@ class WebViewerServer:
         audio_queue = None
         loop = asyncio.get_running_loop()
         try:
+            # Auth gate: when a password is configured, nothing happens (no
+            # frames, no input, no capture-device open) until this client
+            # authenticates over the WebSocket.
+            if self._config.web_password:
+                if not await self._authenticate(ws, addr[0] if addr else "?"):
+                    return
+
             # Client starts in server-stream mode (acquires the capture device).
             await self._acquire_stream(state)
 
@@ -1342,6 +1478,107 @@ class WebViewerServer:
             await self._stop_webrtc(state)
             await self._release_stream(state)
             logger.info(f"Web client disconnected from {ip} ({len(self._clients)} total)")
+
+    # Auth throttle: after _AUTH_MAX_FAILS consecutive wrong passwords from
+    # one IP, that IP is locked out for _AUTH_LOCKOUT_S seconds.  A client
+    # that never authenticates is dropped after _AUTH_TIMEOUT_S.
+    _AUTH_MAX_FAILS = 5
+    _AUTH_LOCKOUT_S = 30.0
+    _AUTH_TIMEOUT_S = 300.0
+    _AUTH_FAIL_DELAY_S = 1.5
+
+    async def _authenticate(self, ws, ip: str) -> bool:
+        """WebSocket-level auth gate; True once the client is authenticated.
+
+        Protocol (client ↔ server, JSON text messages):
+            ← {"type": "auth_required"}
+            → {"type": "auth", "password": "..."}   or  {"token": "..."}
+            ← {"type": "auth_ok", "token": "..."}   on success
+            ← {"type": "auth_failed", "error": "...", "expired"?: true}
+
+        A successful password login issues a random reconnect token so the
+        browser can re-authenticate silently after a WebSocket reconnect or
+        tab reload.  Tokens live in server memory only.  Every other message
+        type is dropped until authentication succeeds.
+        """
+        loop = asyncio.get_running_loop()
+        password = self._config.web_password
+        try:
+            fails, locked_until = self._auth_fails.get(ip, (0, 0.0))
+            if time.monotonic() < locked_until:
+                await ws.send(json.dumps({
+                    "type": "auth_failed",
+                    "error": "too many attempts — try again later",
+                }))
+                return False
+
+            await ws.send(json.dumps({"type": "auth_required"}))
+            deadline = loop.time() + self._AUTH_TIMEOUT_S
+            while True:
+                timeout = deadline - loop.time()
+                if timeout <= 0:
+                    return False
+                try:
+                    message = await asyncio.wait_for(ws.recv(), timeout)
+                except asyncio.TimeoutError:
+                    return False
+                if not isinstance(message, str):
+                    continue
+                try:
+                    ev = json.loads(message)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("type") != "auth":
+                    continue
+
+                token = ev.get("token")
+                if token:
+                    if isinstance(token, str) and token in self._auth_tokens:
+                        await ws.send(json.dumps(
+                            {"type": "auth_ok", "token": token}))
+                        return True
+                    # Stale token (server restarted): tell the client to fall
+                    # back to the password prompt.  Not a brute-force signal.
+                    await ws.send(json.dumps({
+                        "type": "auth_failed", "expired": True,
+                        "error": "session expired",
+                    }))
+                    continue
+
+                attempt = ev.get("password", "")
+                if isinstance(attempt, str) and hmac.compare_digest(
+                        attempt.encode(), password.encode()):
+                    self._auth_fails.pop(ip, None)
+                    token = secrets.token_urlsafe(24)
+                    self._auth_tokens.add(token)
+                    while len(self._auth_tokens) > 256:
+                        self._auth_tokens.pop()
+                    await ws.send(json.dumps(
+                        {"type": "auth_ok", "token": token}))
+                    return True
+
+                # Wrong password: throttle and either lock out or let the
+                # client retry on the same connection.
+                fails += 1
+                if len(self._auth_fails) > 1024:
+                    self._auth_fails.clear()
+                locked = fails >= self._AUTH_MAX_FAILS
+                if locked:
+                    self._auth_fails[ip] = (
+                        0, time.monotonic() + self._AUTH_LOCKOUT_S)
+                else:
+                    self._auth_fails[ip] = (fails, 0.0)
+                logger.warning(f"Web viewer auth failure from {ip}")
+                await asyncio.sleep(self._AUTH_FAIL_DELAY_S)
+                await ws.send(json.dumps({
+                    "type": "auth_failed",
+                    "error": ("too many attempts — try again later"
+                              if locked else "wrong password"),
+                }))
+                if locked:
+                    return False
+        except websockets.ConnectionClosed:
+            return False
 
     @staticmethod
     def _update_frame_gate(state: dict):
