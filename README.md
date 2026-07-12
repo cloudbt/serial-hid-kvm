@@ -156,6 +156,8 @@ Options:
   --web-port PORT           Web viewer port (default: 9330)
   --web-fps FPS             Web viewer frame rate (default: 20)
   --web-quality Q           Web viewer JPEG quality 1-100 (default: 60)
+  --webrtc-fps FPS          WebRTC (H264) stream frame rate (default: 60)
+  --webrtc-bitrate BPS      WebRTC (H264) target bitrate in bits/s (default: 16000000)
   --recording-dir DIR       Folder for browser screen recordings (default: ~/Videos)
 
   --audio-device DEV        Audio input device index or name
@@ -203,6 +205,8 @@ All use the `SHKVM_` prefix:
 | `SHKVM_WEB_PORT` | `9330` | Web viewer port |
 | `SHKVM_WEB_FPS` | `20` | Web viewer frame rate |
 | `SHKVM_WEB_QUALITY` | `60` | Web viewer JPEG quality (1-100) |
+| `SHKVM_WEBRTC_FPS` | `60` | WebRTC (H264) stream frame rate |
+| `SHKVM_WEBRTC_BITRATE` | `16000000` | WebRTC (H264) target bitrate in bits/s |
 | `SHKVM_RECORDING_DIR` | `~/Videos` | Folder for browser screen recordings |
 | `SHKVM_AUDIO_DEVICE` | auto-detect | Audio input device index or name |
 | `SHKVM_AUTOCROP` | `true` | Auto-crop black borders from capture (`0`/`false` to disable) |
@@ -302,6 +306,7 @@ Then open `http://localhost:9330` in a browser. To allow access from other machi
 - Focus-loss detection: all keys released when canvas loses focus (no stuck keys)
 - Audio streaming with Unmute/Mute button (when `--audio-device` is set)
 - Screen recording with audio via the **Record** button (saves to the server, no save dialog)
+- **H264** (WebRTC) low-latency video mode — server-encoded H.264 into a native `<video>` element; the server keeps the capture device (requires `pip install serial-hid-kvm[webrtc]`)
 - **Direct** (native) video mode for maximum smoothness when the browser is on the same machine as the capture card
 - Runs alongside the API server and preview window simultaneously
 
@@ -329,9 +334,30 @@ serial-hid-kvm --headless --web --audio-device 3
 
 The preview window plays audio immediately; the web viewer requires clicking the **Unmute** button (browser autoplay policy).
 
+### H264 (WebRTC) video mode
+
+The default JPEG stream re-encodes every frame on the server and decodes it in the browser, which limits fluidity at high resolutions. The **H264** button switches the video path to WebRTC: the server encodes the capture as H.264 (x264, zero-latency tuning) and streams it over a local `RTCPeerConnection`; the browser renders a hardware-decoded native `<video>` element with proper frame pacing.
+
+Unlike Direct mode, **the server keeps the capture device**, so the API (`capture_frame`), OCR tooling and MCP automation keep working while you watch — and it also works from a remote browser, not just locally. Input still flows over the WebSocket unchanged.
+
+Requirements and tuning:
+
+```bash
+pip install serial-hid-kvm[webrtc]     # installs aiortc
+
+serial-hid-kvm --headless --web --webrtc-fps 60 --webrtc-bitrate 16000000
+```
+
+- `--webrtc-fps` (default 60) — stream frame rate; duplicate frames are skipped automatically when the capture produces fewer.
+- `--webrtc-bitrate` (default 16 Mbps) — H.264 target bitrate. Raise it for crisper text during motion (scrolling), lower it for constrained links.
+- `http://127.0.0.1:9330/?rtc=1` auto-starts H264 mode on load.
+- If aiortc is not installed on the server, the H264 button is disabled with a hint.
+
+If the H.264 encoder (libx264) is unavailable in the installed PyAV build, the stream automatically falls back to VP8.
+
 ### Direct (native) video mode
 
-The default web viewer streams JPEG frames from the server over WebSocket. That works from anywhere on the network, but every frame is re-encoded on the server and decoded in the browser, so at high resolutions it can feel less fluid than the official browser app.
+The default web viewer streams JPEG frames from the server over WebSocket. That works from anywhere on the network, but every frame is re-encoded on the server and decoded in the browser, so at high resolutions it can feel less fluid than the official browser app. (See also the **H264** mode above, which usually makes Direct unnecessary unless you want the absolute minimum latency on a local browser.)
 
 When **the browser runs on the same machine as the capture card** (e.g. you open `http://127.0.0.1:9330` locally), click the **Direct** button to switch to native video: the browser opens the capture device itself via `getUserMedia` and renders a real `<video>` element — GPU-decoded, 60 fps, ~zero added latency — exactly like the official app. Keyboard and mouse still travel over the WebSocket to the server's CH9329, so nothing else changes.
 

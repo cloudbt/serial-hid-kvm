@@ -35,6 +35,8 @@ Client→server binary is handled at the top of `_recv_input` (checks
 | `scroll` | `deltaY` | rel packet with scroll |
 | `release_all` | — | clear all held keys/buttons |
 | `stream` | `on` (bool) | acquire/release the server JPEG stream + capture device |
+| `webrtc_offer` | `sdp` (complete, ICE-gathered), `gen` | negotiate H.264 WebRTC stream; server keeps the device, pauses this client's JPEG; replies `webrtc_answer` or `webrtc_error` echoing `gen` |
+| `webrtc_stop` | — | close the WebRTC session; JPEG stream resumes |
 | `rec_start` | `filename` | open recording file under `recording_dir` |
 | `rec_stop` | — | close file, reply `rec_saved` |
 
@@ -44,8 +46,11 @@ like `stream`, and recording uses `ws.send` directly).
 ### server → client
 | type | fields | client effect |
 |------|--------|---------------|
+| `hello` | `build`,`webrtc` (bool) | auto-reload check; disable H264 button if server lacks aiortc |
 | `audio_config` | `sampleRate`,`channels` | enable Audio button, configure worklet |
 | `capture_device` | `label` | Direct mode matches this device in `enumerateDevices()` |
+| `webrtc_answer` | `sdp`, `gen` | complete answer SDP → `setRemoteDescription` (applied only if `gen` matches the current offer — late answers are dropped) |
+| `webrtc_error` | `error`, `gen` | reject pending offer / show error (stale `gen` ignored) |
 | `rec_saved` | `path` | show "Saved: …" |
 | `rec_error` | `error` | show error |
 

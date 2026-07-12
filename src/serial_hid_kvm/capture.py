@@ -275,6 +275,7 @@ class ScreenCapture:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._latest_frame: np.ndarray | None = None
+        self._frame_seq = 0  # bumped for every new frame stored by the loop
         self._running = False
 
     def _open_device(self):
@@ -434,6 +435,7 @@ class ScreenCapture:
                 self._latest_frame = frame_bgr
             else:
                 self._latest_frame = frame_bgr.copy()
+            self._frame_seq += 1
 
             time.sleep(0.016)  # ~60fps cap
 
@@ -443,6 +445,19 @@ class ScreenCapture:
         if frame is not None:
             return frame.copy()
         return None
+
+    def get_frame_if_newer(self, last_seq: int) -> tuple[np.ndarray | None, int]:
+        """Return ``(frame_copy, seq)`` if a frame newer than *last_seq* exists.
+
+        Cheap poll for consumers that must not process the same frame twice
+        (e.g. the WebRTC video track): only copies the frame when its
+        sequence number advanced, otherwise returns ``(None, seq)``.
+        """
+        seq = self._frame_seq
+        frame = self._latest_frame
+        if frame is None or seq == last_seq:
+            return None, seq
+        return frame.copy(), seq
 
     @property
     def running(self) -> bool:

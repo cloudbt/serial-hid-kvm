@@ -11,9 +11,31 @@
   try `_ensure_open()` and retry on failure instead of crashing, so a transient
   "device busy" during hand-off recovers on its own.
 - On Windows MSMF/DSHOW there is **no MJPEG passthrough** — every frame is
-  decoded then re-encoded. That CPU cost is why the server stream can't match a
-  native `getUserMedia` `<video>` at high resolution. Don't try to fix smoothness
-  by tuning fps/quality; offer Direct mode instead (local only).
+  decoded then re-encoded. That CPU cost is why the server JPEG stream can't
+  match a native `getUserMedia` `<video>` at high resolution. Don't try to fix
+  smoothness by tuning fps/quality; use the H264 (WebRTC) mode — server keeps
+  the device, works remotely — or Direct mode (local only, device handed to
+  the browser).
+- aiortc negotiates codecs **inside `setRemoteDescription`** — call
+  `addTrack` + `setCodecPreferences` BEFORE it, or the H264 preference is
+  silently ignored and you get VP8. Its encoder bitrate caps
+  (`aiortc.codecs.h264/vpx: DEFAULT/MIN/MAX_BITRATE`) are module constants
+  clamping REMB feedback at runtime; raise MAX (or 1080p looks mushy) AND
+  floor MIN (or REMB dips cause scroll blur + encoder rebuilds on every
+  >10% target change).
+- **Never await a device open/close on the WS message loop.** MSMF open
+  takes ~25-30 s (cold AND after a direct-mode hand-back). Awaiting it in
+  `_acquire_stream` froze `_recv_input`, so a `webrtc_offer` queued behind
+  it timed out client-side — the "H264 needs two clicks" bug. Open/close
+  run as background tasks serialised by `_device_lock` (with a
+  `_stream_count` re-check under the lock so release/open can't interleave).
+- **Pair WebRTC answers with their offer** (`gen` counter echoed by the
+  server). A late answer applied to a newer RTCPeerConnection puts it in a
+  broken state ("wrong state: stable" on the next real answer).
+- The toggle-failure class of bug is reproducible without hardware clicks:
+  headless Chrome + CDP `Runtime.evaluate` clicking toolbar buttons (see
+  SKILL.md E2E section; add `--use-fake-ui-for-media-stream` to exercise
+  Direct mode's getUserMedia hand-off).
 
 ## Embedded frontend (`_VIEWER_HTML`)
 - It's a Python `r"""..."""` raw string containing HTML/CSS/JS. A stray `#` at

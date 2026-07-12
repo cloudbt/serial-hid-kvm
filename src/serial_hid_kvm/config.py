@@ -53,6 +53,10 @@ class Config:
         self.web_fps: int = 20
         self.web_quality: int = 85
 
+        # WebRTC (H264 button in the web viewer; requires aiortc)
+        self.webrtc_fps: int = 60
+        self.webrtc_bitrate: int = 16_000_000  # bits/s
+
         # Screen recording (web viewer): directory where the browser-recorded
         # .webm files are saved by the server.  Default: ~/Videos.
         self.recording_dir: str = str(Path.home() / "Videos")
@@ -80,6 +84,7 @@ _FILE_KEYS = {
     "target_layout", "host_layout", "layouts_dir",
     "api_enabled", "api_host", "api_port",
     "web_enabled", "web_host", "web_port", "web_fps", "web_quality",
+    "webrtc_fps", "webrtc_bitrate",
     "recording_dir",
     "audio_device",
     "autocrop",
@@ -152,6 +157,8 @@ _ENV_MAP = {
     "SHKVM_WEB_PORT": "web_port",
     "SHKVM_WEB_FPS": "web_fps",
     "SHKVM_WEB_QUALITY": "web_quality",
+    "SHKVM_WEBRTC_FPS": "webrtc_fps",
+    "SHKVM_WEBRTC_BITRATE": "webrtc_bitrate",
     "SHKVM_RECORDING_DIR": "recording_dir",
     "SHKVM_AUTOCROP": "autocrop",
     "SHKVM_DEBUG_KEYS": "debug_keys",
@@ -204,6 +211,8 @@ def _apply_args(config: Config, args):
         "web_port": "web_port",
         "web_fps": "web_fps",
         "web_quality": "web_quality",
+        "webrtc_fps": "webrtc_fps",
+        "webrtc_bitrate": "webrtc_bitrate",
         "recording_dir": "recording_dir",
     }
     for arg_name, attr in arg_to_attr.items():

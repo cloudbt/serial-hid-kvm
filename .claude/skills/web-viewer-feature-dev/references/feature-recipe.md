@@ -53,6 +53,25 @@ Run the `py_compile` + `node --check` block from SKILL.md. Restart server, reloa
   `_open_recording()` sanitizes filename into `config.recording_dir` (.webm).
 - Config: `recording_dir` (default `~/Videos`). Launcher: `-RecordingDir`.
 
+### H264 / WebRTC video (`H264` button)
+- Client: `RTCPeerConnection` (recvonly, non-trickle: full-SDP offer after ICE
+  gathering) → `webrtc_offer` over the WS; answer applied from `webrtc_answer`;
+  remote track rendered in the same `<video>` element Direct uses
+  (`rtcMode` + `videoMode`); `?rtc=1` auto-starts; reconnect re-offers in
+  `ws.onopen` (`restartRtc`); jitterBufferTarget/playoutDelayHint set to 0.
+- Server: `_start_webrtc`/`_stop_webrtc` in `_web_viewer.py`; `_webrtc.py` has
+  `WebRtcSession` (aiortc pc, H264-first codec prefs set BEFORE
+  setRemoteDescription — aiortc negotiates codecs inside it) and
+  `CaptureVideoTrack` (paced fps, skips duplicate frames via
+  `capture.get_frame_if_newer`, even-trims odd autocrop sizes).
+  **Server keeps the capture device** (unlike Direct); only that client's JPEG
+  stream is paused via `state["webrtc"]` + `_update_frame_gate`. Encoder
+  bitrate caps are module constants in aiortc, raised by
+  `_raise_encoder_bitrate_caps`.
+- Config: `webrtc_fps` (60), `webrtc_bitrate` (8 Mbps). Launcher: `-WebRtcFps`
+  / `-WebRtcBitrate`. Optional dep: `serial-hid-kvm[webrtc]` → aiortc; hello
+  message advertises availability (`webrtc: bool`).
+
 ### Direct (native) video (`Direct` button)
 - Client: `getUserMedia` → `<video srcObject>`; device picked by matching
   `serverCaptureLabel` (from `capture_device` msg) in `enumerateDevices()`;

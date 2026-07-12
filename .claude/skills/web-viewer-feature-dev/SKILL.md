@@ -20,6 +20,9 @@ Direct mode, toolbar hotkey, perf tuning) so you don't re-explore the codebase.
   live here, on both sides of the socket.
 - `capture.py` — `ScreenCapture`: HDMI grab via OpenCV, JPEG encode, autocrop,
   MJPEG passthrough. Read the gotchas before touching device lifecycle.
+- `_webrtc.py` — optional H264/WebRTC streaming (`WebRtcSession`,
+  `CaptureVideoTrack`); server keeps the device (unlike Direct). Needs the
+  `serial-hid-kvm[webrtc]` extra (aiortc). Signaling rides the `/ws` socket.
 - `hid_protocol.py` — `CH9329` serial + packet builders (`build_keyboard_report`,
   `build_mouse_abs_packet` [coords 0-4095], `build_mouse_rel_packet`).
 - `_audio.py` — `AudioCapture` (PCM broadcast to subscriber queues).
@@ -41,6 +44,10 @@ Browser  ──WebSocket(/ws)──  WebViewerServer (_web_viewer.py)  ──  K
 
 - **Video (default):** server `get_frame_jpeg` → binary `0x01`+JPEG → browser
   `createImageBitmap` → `<canvas>` (drops stale frames; renders freshest).
+- **Video (H264/WebRTC):** server encodes the same capture as H.264 (aiortc)
+  → `RTCPeerConnection` → native `<video>`. Server **keeps the device**;
+  only that client's JPEG stream is paused (`state["webrtc"]` +
+  `_update_frame_gate`). Works remotely; OCR/`capture_frame` keep working.
 - **Video (Direct):** browser opens the capture card itself via `getUserMedia`
   → native `<video>`. Server **releases the device** (`_release_stream` →
   `capture.close()`) so the browser can open it. Local-only; conflicts with
@@ -117,6 +124,19 @@ Get-NetTCPConnection -LocalPort 9329 -State Listen | %{ Stop-Process -Id $_.Owni
 ./ai/scripts/Start-NanoKvmKvmApi.ps1 -Web -NoInstall
 ```
 
-I cannot drive the dongle/browser from here; verify statically (above) and ask
-the user to confirm behavior, requesting the status-bar text / server log on
-failure.
+For a real E2E check without touching the user's session, drive a **headless
+Chrome** against the live server and read the server log (proven to work for
+the WebRTC/H264 path — `?rtc=1` auto-starts it):
+
+```powershell
+& "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" --headless=new `
+  --disable-gpu --mute-audio --user-data-dir=$env:TEMP\kvm-e2e-profile `
+  --autoplay-policy=no-user-gesture-required "http://127.0.0.1:9330/?rtc=1"
+# then poll ai/logs/serial-hid-kvm-api.err.log for the expected lines
+```
+
+Caveats: first run of a fresh profile takes ~15 s before the WS even opens,
+and a cold MSMF device open can add ~25 s — poll the log with a generous
+deadline. Kill the chrome process when done. For interactive confirmation
+(input feel, latency) still ask the user, requesting the status-bar text /
+server log on failure.

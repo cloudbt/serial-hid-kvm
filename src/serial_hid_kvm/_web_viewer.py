@@ -11,6 +11,7 @@ Usage (integrated into server.py):
 
 import asyncio
 import hashlib
+import importlib.util
 import json
 import logging
 import queue
@@ -29,6 +30,11 @@ from .hid_protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+# WebRTC (H.264) streaming is optional: pip install serial-hid-kvm[webrtc].
+# find_spec only checks installability — the actual import happens lazily on
+# the first webrtc_offer, so startup cost is unaffected.
+_WEBRTC_AVAILABLE = importlib.util.find_spec("aiortc") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +202,7 @@ body.tb-hidden #container{height:100%}
   <button id="btnRec" title="Record screen + audio to the server's recording folder">&#x23fa; Record</button>
   <button id="btnCursor" title="Toggle local cursor visibility">Cursor</button>
   <button id="btnScale" title="Toggle 1:1 / Fit scaling">Fit</button>
+  <button id="btnRtc" title="Low-latency H.264 video over WebRTC (server keeps the capture device, so OCR/MCP stay available)">H264</button>
   <button id="btnDirect" title="Direct GPU video straight from the capture card (smoothest; uses this PC's device)">Direct</button>
   <button id="btnFs" title="Toggle fullscreen">Fullscreen</button>
   <span id="status">Connecting…</span>
@@ -230,6 +237,17 @@ let videoMode = false;
 let directStream = null;       // active getUserMedia MediaStream in direct mode
 let serverCaptureLabel = "";   // capture-device name reported by the server
 
+// WebRTC (H264) mode: the server encodes the capture as H.264 and streams it
+// over a local RTCPeerConnection; the browser renders a native <video>.
+// Unlike Direct mode the server KEEPS the capture device, so server-side
+// OCR / MCP / capture_frame keep working while the viewer streams.
+let rtcMode = false;
+let rtcPc = null;              // active RTCPeerConnection
+let _rtcWait = null;           // {res, rej} while an offer awaits its answer
+let _rtcGen = 0;               // negotiation generation: pairs answers with
+                               // offers so a late answer for an abandoned
+                               // offer can't corrupt a newer connection
+
 function wsSend(obj) {  // control messages, not gated by view-only
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
@@ -253,10 +271,18 @@ function connect() {
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
-    statusEl.textContent = videoMode ? "Direct video (native)" : "Connected";
-    // A reconnected server starts in stream mode; if we're showing native
-    // video, tell it to release the capture device again.
-    if (videoMode) wsSend({type: "stream", on: false});
+    if (directStream) {
+      statusEl.textContent = "Direct video (native)";
+      // A reconnected server starts in stream mode; if we're showing native
+      // video, tell it to release the capture device again.
+      wsSend({type: "stream", on: false});
+    } else if (rtcMode) {
+      // The server-side peer connection died with the old socket or server —
+      // renegotiate a fresh one.
+      restartRtc();
+    } else {
+      statusEl.textContent = "Connected";
+    }
     // Direct video defaults OFF so the server keeps the capture device and can
     // share frames with server-side OCR / MCP / capture_frame while the viewer
     // is open. Click the Direct button to switch to native getUserMedia video.
@@ -282,9 +308,33 @@ function connect() {
       // Text message (JSON)
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "hello") { checkBuild(msg.build); }
+        if (msg.type === "hello") {
+          checkBuild(msg.build);
+          if (msg.webrtc === false) {
+            const b = document.getElementById("btnRtc");
+            b.disabled = true;
+            b.title = "Server lacks aiortc (pip install serial-hid-kvm[webrtc])";
+          }
+        }
         else if (msg.type === "audio_config") { setupAudioConfig(msg); }
         else if (msg.type === "capture_device") { serverCaptureLabel = msg.label || ""; }
+        else if (msg.type === "webrtc_answer") {
+          // Only apply the answer that matches the current offer; a late
+          // answer for an abandoned offer must be dropped.
+          if (rtcPc && msg.gen === _rtcGen &&
+              rtcPc.signalingState === "have-local-offer") {
+            rtcPc.setRemoteDescription({type: "answer", sdp: msg.sdp})
+              .catch((e) => { if (_rtcWait) _rtcWait.rej(e); });
+          }
+        }
+        else if (msg.type === "webrtc_error") {
+          if (msg.gen !== undefined && msg.gen !== _rtcGen) { /* stale */ }
+          else if (_rtcWait) _rtcWait.rej(new Error(msg.error));
+          else {
+            statusEl.textContent = "WebRTC error: " + msg.error;
+            if (toolbarHidden) showHint("WebRTC error: " + msg.error);
+          }
+        }
         else if (msg.type === "rec_saved") {
           statusEl.textContent = "Saved: " + msg.path;
           if (toolbarHidden) showHint("Saved: " + msg.path);
@@ -306,8 +356,9 @@ setInterval(() => {
   const fps = frameCount / elapsed;
   frameCount = 0;
   lastFpsTime = now;
-  // <video> renders itself in direct mode, so there's no per-frame count.
-  fpsEl.textContent = videoMode ? "native" : fps.toFixed(1) + " fps";
+  // <video> renders itself in direct/webrtc mode, so there's no per-frame count.
+  fpsEl.textContent = videoMode ? (rtcMode ? "h264" : "native")
+                                : fps.toFixed(1) + " fps";
 }, 2000);
 
 // --- Video frame rendering (decode off-thread, always draw the freshest) ---
@@ -956,7 +1007,128 @@ function disableDirect() {
 }
 
 document.getElementById("btnDirect").addEventListener("click", () => {
-  if (videoMode) disableDirect(); else enableDirect();
+  if (directStream) { disableDirect(); }
+  else {
+    if (rtcMode) disableRtc();   // the two <video> modes are exclusive
+    enableDirect();
+  }
+});
+
+// --- WebRTC (H264) mode ---
+// The server encodes the shared capture as H.264 and streams it over a
+// loopback RTCPeerConnection. Signaling is non-trickle over the WebSocket:
+// send a complete offer (ICE gathering finished), get a complete answer.
+function iceComplete(pc) {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((res) => {
+    const check = () => {
+      if (pc.iceGatheringState === "complete") {
+        pc.removeEventListener("icegatheringstatechange", check);
+        res();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", check);
+  });
+}
+
+async function enableRtc() {
+  if (rtcMode) return;
+  const btn = document.getElementById("btnRtc");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  if (directStream) disableDirect();   // hand the device back to the server
+  statusEl.textContent = "Starting H.264 stream…";
+  _rtcGen++;                           // new negotiation generation
+  try {
+    rtcPc = new RTCPeerConnection();
+    const pc = rtcPc;
+    pc.addTransceiver("video", {direction: "recvonly"});
+    // Generous timeout: on a cold server the first offer can sit queued
+    // behind the capture-device open (~tens of seconds on MSMF).
+    const streamReady = new Promise((res, rej) => {
+      _rtcWait = {res, rej};
+      setTimeout(() => rej(new Error("timed out")), 30000);
+    });
+    pc.ontrack = (ev) => {
+      // Minimise the receive-side buffer — this is a loopback link.
+      try {
+        if ("jitterBufferTarget" in ev.receiver) ev.receiver.jitterBufferTarget = 0;
+        if ("playoutDelayHint" in ev.receiver) ev.receiver.playoutDelayHint = 0;
+      } catch (e) {}
+      video.srcObject = (ev.streams && ev.streams[0])
+        ? ev.streams[0] : new MediaStream([ev.track]);
+      const ok = () => { if (_rtcWait) _rtcWait.res(); };
+      if (video.readyState >= 1) ok();
+      else video.addEventListener("loadedmetadata", ok, {once: true});
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc !== rtcPc) return;
+      const st = pc.connectionState;
+      if (rtcMode && (st === "failed" || st === "disconnected" || st === "closed")) {
+        const emsg = "H.264 stream lost (" + st + ")";
+        disableRtc();
+        statusEl.textContent = emsg;
+        if (toolbarHidden) showHint(emsg);
+      }
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    await iceComplete(pc);
+    wsSend({type: "webrtc_offer", sdp: pc.localDescription.sdp, gen: _rtcGen});
+    await streamReady;
+    _rtcWait = null;
+    await video.play().catch(() => {});
+    rtcMode = true;
+    videoMode = true;
+    canvas.style.display = "none";
+    video.style.display = "block";
+    updateCanvasSize();
+    btn.classList.add("active");
+    btn.textContent = "H264 ●";
+    fpsEl.textContent = "h264";
+    statusEl.textContent = "H.264 (WebRTC)";
+  } catch (e) {
+    _rtcWait = null;
+    if (rtcPc) { try { rtcPc.close(); } catch (e2) {} rtcPc = null; }
+    wsSend({type: "webrtc_stop"});   // server resumes the JPEG stream
+    const emsg = "H264 failed: " + (e && e.message ? e.message : e);
+    statusEl.textContent = emsg;
+    if (toolbarHidden) showHint(emsg);
+  }
+  btn.disabled = false;
+  container.focus();
+}
+
+function disableRtc() {
+  const btn = document.getElementById("btnRtc");
+  rtcMode = false;
+  _rtcWait = null;
+  _rtcGen++;                           // invalidate any in-flight answer
+  if (rtcPc) { try { rtcPc.close(); } catch (e) {} rtcPc = null; }
+  wsSend({type: "webrtc_stop"});     // server resumes the JPEG stream
+  if (!directStream) {
+    videoMode = false;
+    video.srcObject = null;
+    video.style.display = "none";
+    canvas.style.display = "block";
+    updateCanvasSize();
+    statusEl.textContent = "Connected";
+  }
+  btn.classList.remove("active");
+  btn.textContent = "H264";
+  container.focus();
+}
+
+function restartRtc() {
+  // Drop the local pc without touching the display mode, then renegotiate.
+  rtcMode = false;
+  _rtcWait = null;
+  _rtcGen++;                           // invalidate any in-flight answer
+  if (rtcPc) { try { rtcPc.close(); } catch (e) {} rtcPc = null; }
+  enableRtc();
+}
+
+document.getElementById("btnRtc").addEventListener("click", () => {
+  if (rtcMode) disableRtc(); else enableRtc();
 });
 
 // --- PWA ---
@@ -968,6 +1140,24 @@ updateCursor();                             // apply default cursor visibility
 showHint("Ctrl+Alt+Enter: toolbar");
 container.focus();
 connect();
+
+// ?rtc=1 auto-starts the low-latency H.264 stream once the socket is up,
+// retrying while the server is still warming up (cold device open).
+if (new URLSearchParams(location.search).has("rtc")) {
+  let autoRtcTries = 0;
+  const autoRtc = async () => {
+    if (rtcMode || autoRtcTries >= 8) return;
+    if (document.getElementById("btnRtc").disabled) return;  // no aiortc
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      autoRtcTries++;
+      await enableRtc();
+      if (!rtcMode) setTimeout(autoRtc, 4000);
+    } else {
+      setTimeout(autoRtc, 500);
+    }
+  };
+  setTimeout(autoRtc, 500);
+}
 </script>
 </body>
 </html>"""
@@ -1009,6 +1199,9 @@ class WebViewerServer:
         # to "direct" (native getUserMedia) video frees the device for the
         # browser to open it.
         self._stream_count = 0
+        # Serialises the (slow, backgrounded) device open/close operations so
+        # a release can never interleave with an open still in flight.
+        self._device_lock = asyncio.Lock()
         self._cap_label: str | None = None  # cached capture-device name
 
     async def start(self):
@@ -1083,7 +1276,10 @@ class WebViewerServer:
 
         # Per-client stream state.  "event" gates _send_frames so the client
         # can pause the server stream (e.g. when using direct/native video).
-        state = {"stream": False, "event": asyncio.Event()}
+        # "webrtc" pauses JPEG frames while the same frames flow over a
+        # WebRTC peer connection instead (device stays with the server).
+        state = {"stream": False, "event": asyncio.Event(),
+                 "webrtc": False, "rtc_session": None}
 
         audio_queue = None
         loop = asyncio.get_running_loop()
@@ -1092,8 +1288,12 @@ class WebViewerServer:
             await self._acquire_stream(state)
 
             # Frontend fingerprint: lets an open viewer auto-reload when the
-            # server has been restarted with changed HTML/JS.
-            await ws.send(json.dumps({"type": "hello", "build": _BUILD_ID}))
+            # server has been restarted with changed HTML/JS.  "webrtc" tells
+            # the client whether the H264 (WebRTC) mode is available.
+            await ws.send(json.dumps({
+                "type": "hello", "build": _BUILD_ID,
+                "webrtc": _WEBRTC_AVAILABLE,
+            }))
 
             # Tell the client which capture device the server uses, so direct
             # mode can pick the matching device via getUserMedia.
@@ -1129,47 +1329,186 @@ class WebViewerServer:
                     await t
                 except (asyncio.CancelledError, Exception):
                     pass
+            for t in done:
+                # Retrieve the exception (e.g. ConnectionClosedError from an
+                # abrupt disconnect) so asyncio doesn't log "Task exception
+                # was never retrieved" for every dead client.
+                if not t.cancelled():
+                    t.exception()
         finally:
             if audio_queue is not None and self._audio is not None:
                 self._audio.unsubscribe(audio_queue)
             self._clients.discard(ws)
+            await self._stop_webrtc(state)
             await self._release_stream(state)
             logger.info(f"Web client disconnected from {ip} ({len(self._clients)} total)")
 
+    @staticmethod
+    def _update_frame_gate(state: dict):
+        """(Re)compute the _send_frames gate for *state*.
+
+        JPEG frames flow only while the client consumes the server stream
+        AND is not receiving the same frames over WebRTC instead — WebRTC
+        keeps the device with the server but makes the JPEG encode per
+        frame pure waste.
+        """
+        if state["stream"] and not state["webrtc"]:
+            state["event"].set()
+        else:
+            state["event"].clear()
+
     async def _acquire_stream(self, state: dict):
-        """Mark *state* as consuming the server stream; open device if first."""
+        """Mark *state* as consuming the server stream; open device if first.
+
+        The device open runs in a background task: an MSMF open can take
+        tens of seconds (measured ~28 s right after a browser hands the
+        device back from direct mode), and every caller of this method sits
+        on the client's message loop, where such a stall freezes input and
+        delays WebRTC signaling past the client's timeout.  Frames simply
+        start flowing when the device is ready.
+        """
         if state["stream"]:
             return
         state["stream"] = True
-        state["event"].set()
+        self._update_frame_gate(state)
         self._stream_count += 1
         if self._stream_count == 1:
             capture = self._hw.get_capture()
             loop = asyncio.get_running_loop()
-            # Non-fatal: the device may still be held by a browser in direct
-            # mode (e.g. right after a reconnect). The capture loop retries
-            # opening, so don't tear down the client connection here.
-            try:
-                await loop.run_in_executor(None, capture.start_capture_thread)
-                logger.info("Capture thread started (stream active)")
-            except Exception as e:
-                logger.warning(f"Capture start failed (device busy?): {e}")
+
+            async def _open():
+                async with self._device_lock:
+                    if self._stream_count == 0:
+                        return  # released again before the open got the lock
+                    # Non-fatal: the device may still be held by a browser in
+                    # direct mode (e.g. right after a reconnect). The capture
+                    # loop retries opening, so nothing is torn down here.
+                    try:
+                        await loop.run_in_executor(
+                            None, capture.start_capture_thread)
+                        logger.info("Capture thread started (stream active)")
+                    except Exception as e:
+                        logger.warning(f"Capture start failed (device busy?): {e}")
+
+            asyncio.create_task(_open())
 
     async def _release_stream(self, state: dict):
-        """Mark *state* as no longer streaming; release device if last."""
+        """Mark *state* as no longer streaming; release device if last.
+
+        Like the open, the close is backgrounded and serialised behind
+        ``_device_lock`` so it can never interleave with an in-flight open.
+        """
         if not state["stream"]:
             return
         state["stream"] = False
-        state["event"].clear()
+        self._update_frame_gate(state)
         self._stream_count -= 1
         if self._stream_count == 0:
             capture = self._hw.get_capture()
             loop = asyncio.get_running_loop()
-            # Fully release the device (close, not just stop the thread) so a
-            # browser in direct mode can open it via getUserMedia. stop alone
-            # leaves the OpenCV VideoCapture holding the device → "Device in use".
-            await loop.run_in_executor(None, capture.close)
-            logger.info("Capture device released (no active streams)")
+
+            async def _close_device():
+                async with self._device_lock:
+                    if self._stream_count > 0:
+                        return  # re-acquired while the close was pending
+                    # Fully release the device (close, not just stop the
+                    # thread) so a browser in direct mode can open it via
+                    # getUserMedia. stop alone leaves the OpenCV VideoCapture
+                    # holding the device → "Device in use".
+                    await loop.run_in_executor(None, capture.close)
+                    logger.info("Capture device released (no active streams)")
+
+            asyncio.create_task(_close_device())
+
+    async def _start_webrtc(self, ws, state: dict, ev: dict):
+        """Negotiate a WebRTC session streaming the capture to this client.
+
+        The server keeps the capture device open (unlike direct mode), so
+        API/OCR/MCP consumers stay functional; only this client's JPEG
+        WebSocket stream is paused to avoid encoding the frames twice.
+
+        The client's ``gen`` value is echoed back in the answer/error so it
+        can discard replies that belong to an offer it has already abandoned
+        (a late answer applied to a newer RTCPeerConnection corrupts it).
+        """
+        sdp = ev.get("sdp", "")
+        gen = ev.get("gen")
+        try:
+            from ._webrtc import WebRtcSession
+        except ImportError:
+            await ws.send(json.dumps({
+                "type": "webrtc_error", "gen": gen,
+                "error": "aiortc is not installed on the server "
+                         "(pip install serial-hid-kvm[webrtc])",
+            }))
+            return
+
+        # The client may come straight from direct mode, which released the
+        # device — make sure the server owns it again.
+        await self._acquire_stream(state)
+
+        # Re-offer replaces any previous session (e.g. after a WS reconnect).
+        # Close the old one in the background — see _stop_webrtc.
+        old = state.get("rtc_session")
+        state["rtc_session"] = None
+        if old is not None:
+            asyncio.create_task(old.close())
+
+        session = None
+
+        def on_closed():
+            # Runs when the peer connection dies (browser gone, ICE failure).
+            # Resume the JPEG stream so the client is never left frameless.
+            if state.get("rtc_session") is session:
+                state["rtc_session"] = None
+                state["webrtc"] = False
+                self._update_frame_gate(state)
+
+        session = WebRtcSession(
+            self._hw.get_capture(),
+            fps=self._config.webrtc_fps,
+            bitrate=self._config.webrtc_bitrate,
+            on_closed=on_closed,
+        )
+        try:
+            answer = await session.handle_offer(sdp)
+        except Exception as e:
+            logger.warning(f"WebRTC negotiation failed: {e}")
+            await session.close()
+            await ws.send(json.dumps({
+                "type": "webrtc_error", "gen": gen, "error": str(e),
+            }))
+            return
+
+        state["rtc_session"] = session
+        state["webrtc"] = True
+        self._update_frame_gate(state)
+        await ws.send(json.dumps({
+            "type": "webrtc_answer", "sdp": answer, "gen": gen,
+        }))
+        logger.info(
+            f"WebRTC session established ({self._config.webrtc_fps} fps, "
+            f"{self._config.webrtc_bitrate // 1000} kbps target)")
+
+    async def _stop_webrtc(self, state: dict):
+        """Close this client's WebRTC session (if any) and resume JPEG.
+
+        The actual peer-connection teardown is backgrounded: aiortc's
+        ``pc.close()`` can take a while (DTLS shutdown against a browser pc
+        that is already gone), and awaiting it here would stall the input
+        loop — including a follow-up ``webrtc_offer`` from the same client.
+        """
+        session = state.get("rtc_session")
+        state["rtc_session"] = None
+        state["webrtc"] = False
+        self._update_frame_gate(state)
+        if session is not None:
+            async def _close():
+                t0 = asyncio.get_running_loop().time()
+                await session.close()
+                dt = asyncio.get_running_loop().time() - t0
+                logger.info(f"WebRTC session closed ({dt:.2f}s)")
+            asyncio.create_task(_close())
 
     def _capture_label(self) -> str:
         """Best-effort human-readable name of the configured capture device.
@@ -1341,6 +1680,17 @@ class WebViewerServer:
                         await self._acquire_stream(state)
                     else:
                         await self._release_stream(state)
+                    continue
+
+                elif ev_type == "webrtc_offer":
+                    # Client requesting the low-latency H.264 (WebRTC) stream.
+                    logger.info("webrtc_offer received")
+                    await self._start_webrtc(ws, state, ev)
+                    continue
+
+                elif ev_type == "webrtc_stop":
+                    logger.info("webrtc_stop received")
+                    await self._stop_webrtc(state)
                     continue
 
                 elif ev_type == "rec_start":

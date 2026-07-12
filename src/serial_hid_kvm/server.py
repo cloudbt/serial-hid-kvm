@@ -505,6 +505,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Web viewer frame rate (default: 20)")
     parser.add_argument("--web-quality", type=int, metavar="Q",
                         help="Web viewer JPEG quality 1-100 (default: 85)")
+    parser.add_argument("--webrtc-fps", type=int, metavar="FPS",
+                        help="WebRTC (H264) stream frame rate (default: 60)")
+    parser.add_argument("--webrtc-bitrate", type=int, metavar="BPS",
+                        help="WebRTC (H264) target bitrate in bits/s"
+                             " (default: 16000000)")
     parser.add_argument("--recording-dir", type=str, metavar="DIR",
                         help="Directory for browser screen recordings"
                              " (default: ~/Videos)")
