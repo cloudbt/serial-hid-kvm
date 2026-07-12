@@ -73,3 +73,24 @@ def test_mouse_click_emits_press_and_release():
     m.set_timing(click_hold=0.0, click_after=0.0)
     m.click("left", 100, 200)
     assert len(dev.sent) == 2
+
+
+def test_mouse_absolute_inversion_maps_from_opposite_corner():
+    dev = FakeDev()
+    m = Mouse(dev, screen_width=100, screen_height=200,
+              invert_x=True, invert_y=True)
+    m.move_absolute(0, 0)
+    packet = dev.sent[-1]
+    x = packet[8] << 8 | packet[7]
+    y = packet[10] << 8 | packet[9]
+    assert (x, y) == (4095, 4095)
+
+
+def test_mouse_relative_inversion_flips_delta_direction():
+    dev = FakeDev()
+    m = Mouse(dev, invert_x=True, invert_y=True)
+    m.move_relative(5, -7)
+    packet = dev.sent[-1]
+    dx = packet[7] if packet[7] < 128 else packet[7] - 256
+    dy = packet[8] if packet[8] < 128 else packet[8] - 256
+    assert (dx, dy) == (-5, 7)

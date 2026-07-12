@@ -29,6 +29,8 @@ class Config:
         # Target screen (for mouse coordinate mapping)
         self.screen_width: int = 1920
         self.screen_height: int = 1080
+        self.mouse_invert_x: bool = False
+        self.mouse_invert_y: bool = False
 
         # Capture device
         self.capture_device: str | None = None
@@ -86,7 +88,7 @@ class Config:
 
 _FILE_KEYS = {
     "serial_port", "serial_baud",
-    "screen_width", "screen_height",
+    "screen_width", "screen_height", "mouse_invert_x", "mouse_invert_y",
     "capture_device", "capture_width", "capture_height", "capture_fourcc",
     "target_layout", "host_layout", "layouts_dir",
     "api_enabled", "api_host", "api_port",
@@ -149,6 +151,8 @@ _ENV_MAP = {
     "SHKVM_SERIAL_BAUD": "serial_baud",
     "SHKVM_SCREEN_WIDTH": "screen_width",
     "SHKVM_SCREEN_HEIGHT": "screen_height",
+    "SHKVM_MOUSE_INVERT_X": "mouse_invert_x",
+    "SHKVM_MOUSE_INVERT_Y": "mouse_invert_y",
     "SHKVM_CAPTURE_DEVICE": "capture_device",
     "SHKVM_CAPTURE_WIDTH": "capture_width",
     "SHKVM_CAPTURE_HEIGHT": "capture_height",
@@ -245,6 +249,10 @@ def _apply_args(config: Config, args):
         config.debug_keys = True
     if getattr(args, "show_cursor", False):
         config.show_cursor = True
+    if getattr(args, "mouse_invert_x", False):
+        config.mouse_invert_x = True
+    if getattr(args, "mouse_invert_y", False):
+        config.mouse_invert_y = True
     if getattr(args, "no_autocrop", False):
         config.autocrop = False
 

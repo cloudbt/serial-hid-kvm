@@ -84,6 +84,8 @@ class KvmHardware:
                 self.get_ch9329(),
                 self._config.screen_width,
                 self._config.screen_height,
+                self._config.mouse_invert_x,
+                self._config.mouse_invert_y,
             )
         return self._mouse
 
@@ -331,6 +333,8 @@ class ApiDispatcher:
         info["config"] = {
             "screen_width": self._config.screen_width,
             "screen_height": self._config.screen_height,
+            "mouse_invert_x": self._config.mouse_invert_x,
+            "mouse_invert_y": self._config.mouse_invert_y,
             "serial_baud": self._config.serial_baud,
             "keyboard_layout": get_layout(),
         }
@@ -475,6 +479,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Target screen width (default: 1920)")
     parser.add_argument("--screen-height", type=int, metavar="PX",
                         help="Target screen height (default: 1080)")
+    parser.add_argument("--mouse-invert-x", action="store_true",
+                        help="Invert absolute mouse X axis before sending HID")
+    parser.add_argument("--mouse-invert-y", action="store_true",
+                        help="Invert absolute mouse Y axis before sending HID")
 
     # Capture
     parser.add_argument("--capture-device", type=str, metavar="DEV",

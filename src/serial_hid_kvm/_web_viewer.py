@@ -1394,6 +1394,16 @@ class WebViewerServer:
         self._auth_tokens: set[str] = set()
         self._auth_fails: dict[str, tuple[int, float]] = {}
 
+    def _map_mouse_abs(self, x: int, y: int) -> tuple[int, int]:
+        """Apply target-specific absolute HID axis mapping."""
+        x = max(0, min(4095, int(x)))
+        y = max(0, min(4095, int(y)))
+        if self._config.mouse_invert_x:
+            x = 4095 - x
+        if self._config.mouse_invert_y:
+            y = 4095 - y
+        return x, y
+
     async def start(self):
         host = self._config.web_host
         port = self._config.web_port
@@ -2279,18 +2289,21 @@ class WebViewerServer:
                     x = ev.get("x", 0)
                     y = ev.get("y", 0)
                     buttons = ev.get("buttons", 0)
+                    x, y = self._map_mouse_abs(x, y)
                     push_move(build_mouse_abs_packet(buttons, x, y))
 
                 elif ev_type == "mousedown":
                     x = ev.get("x", 0)
                     y = ev.get("y", 0)
                     buttons = ev.get("buttons", 0)
+                    x, y = self._map_mouse_abs(x, y)
                     push(build_mouse_abs_packet(buttons, x, y))
 
                 elif ev_type == "mouseup":
                     x = ev.get("x", 0)
                     y = ev.get("y", 0)
                     buttons = ev.get("buttons", 0)
+                    x, y = self._map_mouse_abs(x, y)
                     push(build_mouse_abs_packet(buttons, x, y))
 
                 elif ev_type == "scroll":
