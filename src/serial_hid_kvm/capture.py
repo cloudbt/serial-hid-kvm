@@ -87,13 +87,18 @@ def _parse_vidpid(device_id: str) -> str:
 def _get_windows_video_device_names() -> list[dict]:
     """Query Windows PnP for video capture device names."""
     try:
+        # Pin both ends of the pipe to UTF-8: PowerShell otherwise emits the
+        # console codepage (cp932 on Japanese Windows) while Python decodes
+        # with the locale — any mismatch garbles names or kills the read.
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_PnPEntity"
+             "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+             " Get-CimInstance Win32_PnPEntity"
              " | Where-Object { $_.PNPClass -eq 'Camera' -or $_.PNPClass -eq 'Image' }"
              " | Select-Object Name, DeviceID"
              " | ConvertTo-Json -Compress"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=10,
         )
         if result.returncode != 0:
             return []

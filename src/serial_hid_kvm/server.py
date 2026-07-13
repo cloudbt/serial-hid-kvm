@@ -649,14 +649,18 @@ def _audio_vidpid_lookup() -> dict[str, str]:
     if system == "Windows":
         try:
             from .capture import _parse_vidpid
+            # UTF-8 pinned on both ends of the pipe — see the matching PnP
+            # query in capture.py for why (cp932 console mismatch).
             proc = subprocess.run(
                 ["powershell.exe", "-NoProfile", "-Command",
-                 "Get-CimInstance Win32_PnPEntity"
+                 "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+                 " Get-CimInstance Win32_PnPEntity"
                  " | Where-Object { $_.PNPClass -eq 'Media'"
                  " -or $_.PNPClass -eq 'AudioEndpoint' }"
                  " | Select-Object Name, DeviceID"
                  " | ConvertTo-Json -Compress"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=10,
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 import json as _json
