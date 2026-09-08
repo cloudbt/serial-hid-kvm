@@ -731,7 +731,7 @@ def _cmd_list_devices():
             if p.vid is not None and p.pid is not None:
                 vidpid = f"  [{p.vid:04X}:{p.pid:04X}]"
                 if (p.vid, p.pid) in CH340_VIDPID:
-                    tag = "  [CH340 - auto-detect target]"
+                    tag = "  [WCH USB serial - auto-detect target]"
             print(f"  {p.device:20s}  {p.description}{vidpid}{tag}")
 
     print("\nVideo capture devices:")
