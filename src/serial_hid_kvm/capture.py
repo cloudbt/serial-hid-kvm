@@ -73,7 +73,7 @@ def _fourcc_int_to_str(fourcc_int: int) -> str:
     return "".join(chars)
 
 
-_VIDPID_RE = re.compile(r"VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})")
+_VIDPID_RE = re.compile(r"VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})", re.IGNORECASE)
 
 
 def _parse_vidpid(device_id: str) -> str:
@@ -210,14 +210,18 @@ def list_capture_devices(enumerate_formats: bool = False) -> list[dict]:
                 devices.append(entry)
 
     elif system == "Windows":
-        # PnP enumeration order matches DirectShow index order
-        pnp_devices = _get_windows_video_device_names()
+        # Use the actual MSMF index order, not the unrelated PnP query order.
+        from ._windows_devices import enumerate_video_devices
+        pnp_devices = enumerate_video_devices()
         for idx, pnp in enumerate(pnp_devices):
             entry = {
                 "device": str(idx),
                 "name": pnp["name"],
                 "vidpid": pnp.get("vidpid", ""),
+                "device_id": pnp["device_id"],
+                "backend": "MSMF",
             }
+            entry["vidpid"] = _parse_vidpid(pnp["device_id"])
             if enumerate_formats:
                 entry["formats"] = _enumerate_formats_windows(idx)
             devices.append(entry)
@@ -231,6 +235,11 @@ def detect_capture_device() -> int | str:
     Does not open any device, so it works even when devices are already in use.
     """
     devices = list_capture_devices()
+
+    captures = [d for d in devices if not _is_webcam_name(d["name"])]
+    if len(captures) > 1:
+        raise RuntimeError("Multiple HDMI capture devices found. Set --capture-device "
+                           "explicitly; use mf:<device_id> for a stable Windows binding.")
 
     # First pass: pick the first non-webcam device
     for d in devices:
@@ -284,6 +293,7 @@ class ScreenCapture:
         self._frame_seq = 0  # bumped for every new frame stored by the loop
         self._running = False
         self._negotiated_info: dict | None = None
+        self._resolved_device: int | str | None = None
 
     def _open_device(self):
         """Open the capture device and apply requested resolution."""
@@ -296,11 +306,23 @@ class ScreenCapture:
         if isinstance(device, str) and device.isdigit():
             device = int(device)
 
+        identity_bound = isinstance(device, str) and device.startswith("mf:")
+        if identity_bound:
+            if platform.system() != "Windows":
+                raise RuntimeError("mf: device bindings require Windows")
+            matches = [d for d in list_capture_devices()
+                       if d.get("device_id", "").casefold() == device[3:].casefold()]
+            if len(matches) != 1:
+                raise RuntimeError("Bound capture device is not uniquely connected; "
+                                   "recheck the USB device binding")
+            device = int(matches[0]["device"])
+        self._resolved_device = device
+
         if platform.system() == "Windows" and isinstance(device, int):
             # Prefer MSMF (Media Foundation) — handles FOURCC/MJPEG properly.
             # DirectShow's CAP_PROP_FOURCC set is broken in OpenCV.
             self._cap = cv2.VideoCapture(device, cv2.CAP_MSMF)
-            if not self._cap.isOpened():
+            if not self._cap.isOpened() and not identity_bound:
                 logger.info("MSMF backend failed, falling back to DirectShow")
                 self._cap = cv2.VideoCapture(device, cv2.CAP_DSHOW)
         else:
@@ -646,6 +668,7 @@ class ScreenCapture:
             fourcc_str = self._req_fourcc
         info = {
             "device": str(self._device),
+            "device_index": self._resolved_device,
             "width": int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
             "height": int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
             "requested_width": self._req_width,

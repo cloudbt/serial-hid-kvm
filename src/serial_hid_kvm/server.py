@@ -141,7 +141,7 @@ class ApiDispatcher:
     # -- method handlers (run in thread pool) --------------------------------
 
     def _do_ping(self, params: dict) -> dict:
-        return {"pong": True}
+        return {"pong": True, "target_name": self._config.target_name}
 
     def _do_type_text(self, params: dict) -> dict:
         text = params["text"]
@@ -487,6 +487,12 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Audio input device name or index"
                              " (auto-detected from capture device VID:PID;"
                              " requires: pip install serial-hid-kvm[audio])")
+    parser.add_argument("--no-auto-audio", action="store_true",
+                        help="Require an explicit audio device (for multiple identical KVMs)")
+    parser.add_argument("--no-direct", action="store_true",
+                        help="Disable browser Direct capture when device names are ambiguous")
+    parser.add_argument("--target-name", type=str, metavar="NAME",
+                        help="Target identity shown in the viewer and API")
 
     # Web viewer
     parser.add_argument("--web", action="store_true",
@@ -891,7 +897,7 @@ def main():
     dispatcher = ApiDispatcher(hardware, config)
 
     # Auto-detect audio device from video device VID:PID
-    if config.audio_device is None:
+    if config.audio_device is None and config.auto_audio:
         _auto_detect_audio(config)
 
     # Create shared audio capture if configured

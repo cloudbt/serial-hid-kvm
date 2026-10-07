@@ -54,6 +54,8 @@ class Config:
         self.web_port: int = 9330
         self.web_fps: int = 20
         self.web_quality: int = 85
+        self.target_name: str = ""
+        self.direct_enabled: bool = True
 
         # Web viewer access control (for non-localhost / public deployment).
         # web_password: clients must authenticate over the WebSocket before
@@ -72,6 +74,7 @@ class Config:
 
         # Audio (web viewer only; None = disabled)
         self.audio_device: str | None = None
+        self.auto_audio: bool = True
 
         # Capture processing
         self.autocrop: bool = True
@@ -97,6 +100,7 @@ _FILE_KEYS = {
     "webrtc_fps", "webrtc_bitrate",
     "recording_dir",
     "audio_device",
+    "auto_audio", "target_name", "direct_enabled",
     "autocrop",
     "debug_keys", "headless", "show_cursor",
 }
@@ -164,6 +168,9 @@ _ENV_MAP = {
     "SHKVM_API_HOST": "api_host",
     "SHKVM_API_PORT": "api_port",
     "SHKVM_AUDIO_DEVICE": "audio_device",
+    "SHKVM_AUTO_AUDIO": "auto_audio",
+    "SHKVM_TARGET_NAME": "target_name",
+    "SHKVM_DIRECT_ENABLED": "direct_enabled",
     "SHKVM_WEB": "web_enabled",
     "SHKVM_WEB_HOST": "web_host",
     "SHKVM_WEB_PORT": "web_port",
@@ -222,6 +229,7 @@ def _apply_args(config: Config, args):
         "api_host": "api_host",
         "api_port": "api_port",
         "audio_device": "audio_device",
+        "target_name": "target_name",
         "web_host": "web_host",
         "web_port": "web_port",
         "web_fps": "web_fps",
@@ -255,6 +263,10 @@ def _apply_args(config: Config, args):
         config.mouse_invert_y = True
     if getattr(args, "no_autocrop", False):
         config.autocrop = False
+    if getattr(args, "no_auto_audio", False):
+        config.auto_audio = False
+    if getattr(args, "no_direct", False):
+        config.direct_enabled = False
 
 
 # ---------------------------------------------------------------------------

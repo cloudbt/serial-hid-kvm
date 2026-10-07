@@ -278,6 +278,9 @@ Options:
 
   --audio-device DEV        Audio input device index or name
                             (auto-detected from capture device VID:PID)
+  --no-auto-audio           Require explicit audio selection for identical KVMs
+  --no-direct               Disable browser Direct capture for identical KVMs
+  --target-name NAME        Label this instance in the viewer and API
 
   -s, --serial-port PORT    Serial port (e.g. COM3, /dev/ttyUSB0)
   --serial-baud BAUD        Serial baud rate (default: 9600)
@@ -285,7 +288,7 @@ Options:
   --screen-width PX         Target screen width (default: 1920)
   --screen-height PX        Target screen height (default: 1080)
 
-  --capture-device DEV      Capture device index or path
+  --capture-device DEV      Index/path, or mf:<device_id> on Windows
   --capture-width PX        Capture resolution width (default: 1920)
   --capture-height PX       Capture resolution height (default: 1080)
   --no-autocrop             Disable automatic black border cropping
@@ -328,12 +331,27 @@ All use the `SHKVM_` prefix:
 | `SHKVM_WEBRTC_BITRATE` | `16000000` | WebRTC (H264) target bitrate in bits/s |
 | `SHKVM_RECORDING_DIR` | `~/Videos` | Folder for browser screen recordings |
 | `SHKVM_AUDIO_DEVICE` | auto-detect | Audio input device index or name |
+| `SHKVM_AUTO_AUDIO` | `true` | Automatically match HDMI audio; disable for identical devices |
+| `SHKVM_TARGET_NAME` | (empty) | Target label in the viewer and API ping |
+| `SHKVM_DIRECT_ENABLED` | `true` | Allow browser Direct mode |
 | `SHKVM_AUTOCROP` | `true` | Auto-crop black borders from capture (`0`/`false` to disable) |
 | `SHKVM_DEBUG_KEYS` | `0` | Enable keycode debug output (`1`/`true`) |
 | `SHKVM_SHOW_CURSOR` | `0` | Show mouse cursor on preview window (`1`/`true`) |
 | `SHKVM_LOG_FILE` | — | Also write logs to a file |
 
 ### Config File
+
+For multiple NanoKVMs, run one server per Target with distinct API/Web ports,
+an explicit `--serial-port`, capture selector, and native screen dimensions.
+On Windows, `--list-devices` includes the MSMF `device_id`; use
+`--capture-device "mf:<device_id>"` to resolve its current index when opening.
+The binding fails if that identity is absent and never switches to a different
+backend's index. Moving USB ports can change identity and require rebinding.
+Auto-detection rejects multiple HDMI capture devices. Use `--no-direct
+--no-auto-audio` when their friendly names/VID:PID are identical; explicitly
+select each audio input if needed.
+With Direct disabled, closing the last viewer keeps an opened capture warm
+for API snapshots and the next viewer; stopping the server releases it.
 
 YAML config file is searched in this order:
 

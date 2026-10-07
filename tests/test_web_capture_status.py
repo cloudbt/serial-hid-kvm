@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import unittest
+from unittest.mock import Mock
 
 import websockets
 
@@ -13,6 +14,36 @@ from tests.test_web_auth import _DummyCapture, _DummyHardware, _free_port
 
 
 class WebCaptureStatusTests(unittest.TestCase):
+    def _check_last_viewer_release(self, direct_enabled):
+        async def run():
+            config = Config()
+            config.direct_enabled = direct_enabled
+            capture = Mock()
+            closed = threading.Event()
+            capture.close.side_effect = closed.set
+            hardware = Mock()
+            hardware.get_capture.return_value = capture
+            server = WebViewerServer(hardware, config)
+            server._stream_count = 1
+            state = {"stream": True, "webrtc": False, "event": asyncio.Event()}
+            state["event"].set()
+            await server._release_stream(state)
+            self.assertFalse(state["event"].is_set())
+            self.assertEqual(server._stream_count, 0)
+            if direct_enabled:
+                self.assertTrue(await asyncio.to_thread(closed.wait, 1))
+                capture.close.assert_called_once()
+            else:
+                await asyncio.sleep(0.03)
+                capture.close.assert_not_called()
+        asyncio.run(run())
+
+    def test_bound_target_keeps_capture_warm_after_last_viewer_disconnect(self):
+        self._check_last_viewer_release(False)
+
+    def test_direct_mode_still_releases_device_for_browser_capture(self):
+        self._check_last_viewer_release(True)
+
     def test_hello_arrives_before_slow_open_and_status_updates_afterward(self):
         async def run():
             release_open = threading.Event()
@@ -35,6 +66,8 @@ class WebCaptureStatusTests(unittest.TestCase):
             config.web_host = "127.0.0.1"
             config.web_port = _free_port()
             config.capture_width, config.capture_height = 1920, 1280
+            config.target_name = "target2"
+            config.direct_enabled = False
             hardware = _DummyHardware()
             hardware._cap = SlowCapture()
             server = WebViewerServer(hardware, config)
@@ -44,6 +77,8 @@ class WebCaptureStatusTests(unittest.TestCase):
                 async with websockets.connect(f"ws://127.0.0.1:{config.web_port}/ws") as ws:
                     hello = json.loads(await asyncio.wait_for(ws.recv(), 1))
                     self.assertEqual(hello["type"], "hello")
+                    self.assertEqual(hello["target_name"], "target2")
+                    self.assertFalse(hello["direct"])
                     self.assertEqual(hello["capture_status"]["status"], "pending")
                     self.assertEqual(hello["capture_request"], {"width": 1920, "height": 1280})
                     release_open.set()

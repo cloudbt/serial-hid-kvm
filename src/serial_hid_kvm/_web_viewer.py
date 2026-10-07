@@ -261,6 +261,7 @@ body.tb-hidden #container{height:100%}
   <button id="btnDirect" title="Direct GPU video straight from the capture card (smoothest; uses this PC's device)">Direct</button>
   <button id="btnFs" title="Toggle fullscreen">Fullscreen</button>
   <span id="status">Connecting…</span>
+  <span id="targetName"></span>
   <span id="fps"></span>
   <span id="resolution"></span>
 </div>
@@ -428,6 +429,15 @@ function connect() {
         else if (msg.type === "auth_failed") { onAuthFailed(msg); }
         else if (msg.type === "hello") {
           checkBuild(msg.build);
+          if (msg.target_name) {
+            document.title = msg.target_name + " · NanoKVM";
+            document.getElementById("targetName").textContent = msg.target_name;
+          }
+          if (msg.direct === false) {
+            const directBtn = document.getElementById("btnDirect");
+            directBtn.disabled = true;
+            directBtn.title = "Direct is disabled for this device binding; use H264";
+          }
           captureRequest = msg.capture_request || null;
           restoreDisplayAspect();
           applyCaptureStatus(msg.capture_status || null);
@@ -1637,6 +1647,8 @@ class WebViewerServer:
             await ws.send(json.dumps({
                 "type": "hello", "build": _BUILD_ID,
                 "webrtc": _WEBRTC_AVAILABLE,
+                "direct": self._config.direct_enabled,
+                "target_name": self._config.target_name,
                 "adaptive": wan,
                 "capture_request": {"width": self._config.capture_width,
                                     "height": self._config.capture_height},
@@ -1848,17 +1860,19 @@ class WebViewerServer:
             asyncio.create_task(_open())
 
     async def _release_stream(self, state: dict):
-        """Mark *state* as no longer streaming; release device if last.
+        """Release the last stream's device only when Direct can take it.
 
         Like the open, the close is backgrounded and serialised behind
         ``_device_lock`` so it can never interleave with an in-flight open.
+        Bound multi-Target servers disable Direct and keep capture warm for
+        API snapshots and subsequent viewers, avoiding slow MSMF reopen.
         """
         if not state["stream"]:
             return
         state["stream"] = False
         self._update_frame_gate(state)
         self._stream_count -= 1
-        if self._stream_count == 0:
+        if self._stream_count == 0 and self._config.direct_enabled:
             capture = self._hw.get_capture()
             loop = asyncio.get_running_loop()
 
