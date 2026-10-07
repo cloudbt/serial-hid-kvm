@@ -15,6 +15,9 @@ from serial_hid_kvm.config import Config
 
 
 class _DummyCapture:
+    def get_cached_info(self):
+        return {"status": "pending", "width": None, "height": None}
+
     def start_capture_thread(self):
         pass
 

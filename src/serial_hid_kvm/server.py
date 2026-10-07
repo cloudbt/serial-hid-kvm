@@ -266,25 +266,7 @@ class ApiDispatcher:
     def _do_capture_frame(self, params: dict) -> dict:
         quality = params.get("quality", 85)
         cap = self._hw.get_capture()
-        result = cap.get_frame_jpeg(quality)
-        if result is None:
-            # No cached frame yet (e.g. headless API use with no preview window
-            # or browser stream driving the capture loop). Start the
-            # self-healing capture thread and wait briefly for the first frame
-            # rather than a single cold read, which reliably fails on MSMF.
-            cap.ensure_streaming()
-            cap.wait_for_frame(2.0)
-            result = cap.get_frame_jpeg(quality)
-        if result is None:
-            # Last-resort single-shot capture.
-            image = cap.capture()
-            import io
-            buf = io.BytesIO()
-            image.save(buf, format="JPEG", quality=quality)
-            jpeg_bytes = buf.getvalue()
-            w, h = image.size
-        else:
-            jpeg_bytes, w, h = result
+        jpeg_bytes, w, h = cap.capture_fresh_jpeg(quality)
         b64 = base64.b64encode(jpeg_bytes).decode("ascii")
         return {"jpeg_b64": b64, "width": w, "height": h}
 
@@ -339,6 +321,10 @@ class ApiDispatcher:
             "keyboard_layout": get_layout(),
         }
         return info
+
+    def _do_get_capture_status(self, params: dict) -> dict:
+        # Startup/status callers must never trigger a slow device open.
+        return self._hw.get_capture().get_cached_info()
 
     def _do_list_capture_devices(self, params: dict) -> dict:
         return {"devices": list_capture_devices()}

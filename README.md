@@ -427,6 +427,8 @@ Then open `http://localhost:9330` in a browser. To allow access from other machi
 - Password login overlay when the server sets `--web-password`; the session token survives reconnects and tab reloads ("Remember on this device" keeps it across browser restarts until the server restarts)
 - Automatic LAN/WAN tuning per connection: remote (public-IP) viewers get a credit-paced, quality-adaptive JPEG stream, WAN-friendly H264 defaults with an H264 quality selector in the toolbar, and on-demand audio — LAN viewers keep the original maximum-quality low-latency behaviour (see [Remote-use notes](#remote-use-notes))
 - Dark theme, responsive canvas with aspect ratio preservation
+- Requested capture and received frame dimensions shown separately; differences are highlighted
+- Optional **Correct to 3:2** display proportion setting for a squeezed 3:2 source
 - Focus-loss detection: all keys released when canvas loses focus (no stuck keys)
 - Audio streaming with Unmute/Mute button (when `--audio-device` is set)
 - Screen recording with audio via the **Record** button (saves to the server, no save dialog)
@@ -436,9 +438,15 @@ Then open `http://localhost:9330` in a browser. To allow access from other machi
 
 As with the preview window, the mouse cursor is hidden by default. The **Cursor** button in the toolbar shows a local cursor that tracks your mouse instantly, reducing the feeling of input lag caused by video stream latency.
 
+**Display proportions**: The ratio selector defaults to **Source ratio**, which preserves the received frame's dimensions. Choose **Correct to 3:2** only when a complete 3:2 desktop has been squeezed into a 16:9 stream. This changes the canvas/video display proportions in JPEG, H264 and Direct modes, without changing capture resolution or restoring lost detail. Mouse coordinates still map by fractions of the displayed image. In corrected mode, the native scaling button reads **Width 1:1**, since only horizontal pixels remain 1:1. The **Request** and **Frame** labels distinguish requested capture size from received image size; auto-cropping can also make those dimensions differ. The API's `get_device_info` exposes the negotiated device dimensions, `requested_width`/`requested_height`, and `resolution_matches_request`.
+
+**API snapshots**: `capture_frame` restarts capture when needed and waits for a frame captured after the request. A stalled device produces an error after the frame-delivery timeout (two seconds after startup), rather than silently returning a cached frame. Releasing the capture device clears frame and crop caches.
+
 **Auto-crop**: HDMI capture dongles (e.g. MacroSilicon MS213x) always output 1920x1080 internally. When the target PC runs at a non-16:9 resolution (e.g. 1024x768), black bars are added (pillarboxing/letterboxing). Auto-crop detects these black borders and removes them so the preview, web viewer, and API all receive clean frames. Mouse coordinate mapping adjusts automatically since it uses the cropped frame dimensions. Disable with `--no-autocrop` or `SHKVM_AUTOCROP=false` if needed.
 
 **Known limitation**: The web viewer supports up to 6 simultaneous key presses (the HID protocol maximum), but browser-level key event quirks may affect complex multi-key scenarios. For reliable text input, use the API's `type_text` method.
+
+The display ratio selection is saved in the browser separately for each requested capture size and restored on page reload or reconnect. If browser storage is unavailable, manual correction still works without saving the selection. When a requested **1920×1280** mode negotiates to different device dimensions, the viewer automatically selects **Correct to 3:2**, including in H264 mode. This automatic fallback takes priority over a saved Source ratio; you can still change the ratio manually during the session. Device negotiation metadata arrives asynchronously, so a slow capture open does not block the viewer handshake. The `get_capture_status` API returns cached pending/ready status without opening video or serial hardware. The toolbar distinguishes **Request**, **Capture** (negotiated size), and **Frame** when received dimensions differ due to cropping or Direct mode.
 
 ### Audio
 

@@ -209,6 +209,9 @@ html,body{width:100%;height:100%;overflow:hidden;background:#1a1a2e;font-family:
 #fps{font-size:12px;color:#8888aa;min-width:70px;text-align:right}
 #container{display:flex;align-items:center;justify-content:center;width:100%;height:calc(100% - 36px);background:#0a0a1a;overflow:auto;cursor:none;outline:none}
 #screen,#video{display:block;image-rendering:auto;background:#0a0a1a}
+#video{object-fit:fill}
+#resolution{font-size:12px;white-space:nowrap}
+#resolution.mismatch{color:#ffcf70}
 #toolbar button.active{background:#2a6a2a;border-color:#3a8a3a}
 #btnRec.recording{background:#7a1a1a;border-color:#c03030;animation:recpulse 1.5s ease-in-out infinite}
 @keyframes recpulse{0%,100%{opacity:1}50%{opacity:.55}}
@@ -243,6 +246,10 @@ body.tb-hidden #container{height:100%}
   <button id="btnRec" title="Record screen + audio to the server's recording folder">&#x23fa; Record</button>
   <button id="btnCursor" title="Toggle local cursor visibility">Cursor</button>
   <button id="btnScale" title="Toggle 1:1 / Fit scaling">Fit</button>
+  <select id="displayAspect" aria-label="Display aspect ratio" title="Display proportion correction; does not change capture resolution">
+    <option value="source">Source ratio</option>
+    <option value="3:2">Correct to 3:2</option>
+  </select>
   <button id="btnRtc" title="Low-latency H.264 video over WebRTC (server keeps the capture device, so OCR/MCP stay available)">H264</button>
   <select id="rtcQuality" title="H264 quality preset — Auto picks 16M/60 on LAN and 4M/30 for remote viewers">
     <option value="auto">Auto</option>
@@ -255,6 +262,7 @@ body.tb-hidden #container{height:100%}
   <button id="btnFs" title="Toggle fullscreen">Fullscreen</button>
   <span id="status">Connecting…</span>
   <span id="fps"></span>
+  <span id="resolution"></span>
 </div>
 <div id="container" tabindex="0"><canvas id="screen"></canvas><video id="video" playsinline muted style="display:none"></video></div>
 <div id="hint"></div>
@@ -420,6 +428,10 @@ function connect() {
         else if (msg.type === "auth_failed") { onAuthFailed(msg); }
         else if (msg.type === "hello") {
           checkBuild(msg.build);
+          captureRequest = msg.capture_request || null;
+          restoreDisplayAspect();
+          applyCaptureStatus(msg.capture_status || null);
+          updateResolutionStatus();
           adaptiveAck = !!msg.adaptive;
           if (msg.webrtc === false) {
             const b = document.getElementById("btnRtc");
@@ -442,6 +454,7 @@ function connect() {
           // and can share frames with server-side OCR / MCP / capture_frame
           // while the viewer is open.
         }
+        else if (msg.type === "capture_status") { applyCaptureStatus(msg.info); }
         else if (msg.type === "audio_config") { setupAudioConfig(msg); }
         else if (msg.type === "capture_device") { serverCaptureLabel = msg.label || ""; }
         else if (msg.type === "webrtc_answer") {
@@ -516,6 +529,58 @@ async function renderLoop() {
 
 // --- Display sizing (works for both the canvas and the direct <video>) ---
 let scaleMode = "fit";  // "native" = 1:1 pixel, "fit" = fit to window (default)
+let captureRequest = null;
+let captureStatus = null;
+let aspectManuallySelected = false;
+const displayAspect = document.getElementById("displayAspect");
+
+function applyCaptureStatus(info) {
+  captureStatus = info;
+  // Use negotiated device dimensions, not auto-cropped frame dimensions.
+  if (!aspectManuallySelected && captureRequest &&
+      captureRequest.width === 1920 && captureRequest.height === 1280 &&
+      info && info.status === "ready" && info.width > 0 && info.height > 0 &&
+      (info.width !== 1920 || info.height !== 1280)) {
+    displayAspect.value = "3:2";
+  }
+  updateCanvasSize();
+}
+
+function displayAspectKey() {
+  if (!captureRequest) return null;
+  return "serial-hid-kvm-display-aspect:" + captureRequest.width + "x" + captureRequest.height;
+}
+
+function restoreDisplayAspect() {
+  const key = displayAspectKey();
+  if (!key) return;
+  try {
+    const saved = localStorage.getItem(key);
+    displayAspect.value = saved === "3:2" ? "3:2" : "source";
+  } catch (_) { /* Storage may be unavailable in a restricted browser. */ }
+  updateCanvasSize();
+}
+
+function updateResolutionStatus() {
+  const el = document.getElementById("resolution");
+  const w = mediaW(), h = mediaH();
+  const requested = captureRequest && captureRequest.width && captureRequest.height;
+  const mismatch = !!(requested && w && h &&
+    (w !== captureRequest.width || h !== captureRequest.height));
+  const parts = [];
+  if (requested) parts.push("Request " + captureRequest.width + "×" + captureRequest.height);
+  if (captureStatus && captureStatus.status === "ready") {
+    parts.push("Capture " + captureStatus.width + "×" + captureStatus.height);
+  }
+  if (w && h && (!captureStatus || captureStatus.status !== "ready" ||
+      w !== captureStatus.width || h !== captureStatus.height)) {
+    parts.push("Frame " + w + "×" + h);
+  }
+  el.textContent = parts.join(" · ") + (mismatch ? " ⚠" : "");
+  el.classList.toggle("mismatch", mismatch);
+  el.title = "Requested capture size, negotiated capture size and received frame size (after any auto-crop)." +
+    (mismatch ? " Dimensions differ; check device support and auto-crop." : "");
+}
 
 function activeEl() { return videoMode ? video : canvas; }
 function mediaW() { return videoMode ? video.videoWidth : canvas.width; }
@@ -524,11 +589,15 @@ function mediaH() { return videoMode ? video.videoHeight : canvas.height; }
 function updateCanvasSize() {
   const el = activeEl();
   const mw = mediaW(), mh = mediaH();
+  updateResolutionStatus();
   if (!mw || !mh) return;
+  const ar = displayAspect.value === "3:2" ? 3 / 2 : mw / mh;
+  const btn = document.getElementById("btnScale");
+  btn.textContent = scaleMode === "fit" ? "Fit" :
+    (displayAspect.value === "source" ? "1:1" : "Width 1:1");
   if (scaleMode === "fit") {
     const cw = container.clientWidth;
     const ch = container.clientHeight;
-    const ar = mw / mh;
     let dw, dh;
     if (cw / ch > ar) { dh = ch; dw = ch * ar; }
     else { dw = cw; dh = cw / ar; }
@@ -536,11 +605,21 @@ function updateCanvasSize() {
     el.style.height = dh + "px";
   } else {
     el.style.width = mw + "px";
-    el.style.height = mh + "px";
+    el.style.height = (mw / ar) + "px";
   }
 }
 window.addEventListener("resize", updateCanvasSize);
 video.addEventListener("loadedmetadata", () => { if (videoMode) updateCanvasSize(); });
+video.addEventListener("resize", () => { if (videoMode) updateCanvasSize(); });
+displayAspect.addEventListener("change", () => {
+  aspectManuallySelected = true;
+  try {
+    const key = displayAspectKey();
+    if (key) localStorage.setItem(key, displayAspect.value);
+  } catch (_) { /* Correction still works without persistent storage. */ }
+  updateCanvasSize();
+  container.focus();
+});
 
 // --- Mouse coordinate normalisation (0-4095) ---
 function mouseCoords(e) {
@@ -1063,7 +1142,8 @@ function isWebcamLabel(l) {
 }
 
 function openCapture(deviceId) {
-  const v = {width: {ideal: 1920}, height: {ideal: 1280}, frameRate: {ideal: 60}};
+  const v = {width: {ideal: captureRequest?.width || 1920},
+             height: {ideal: captureRequest?.height || 1080}, frameRate: {ideal: 60}};
   if (deviceId) v.deviceId = {exact: deviceId};
   return navigator.mediaDevices.getUserMedia({video: v, audio: false});
 }
@@ -1558,6 +1638,9 @@ class WebViewerServer:
                 "type": "hello", "build": _BUILD_ID,
                 "webrtc": _WEBRTC_AVAILABLE,
                 "adaptive": wan,
+                "capture_request": {"width": self._config.capture_width,
+                                    "height": self._config.capture_height},
+                "capture_status": self._hw.get_capture().get_cached_info(),
             }))
 
             # Tell the client which capture device the server uses, so direct
@@ -1585,6 +1668,7 @@ class WebViewerServer:
                 }))
 
             tasks = [
+                asyncio.create_task(self._send_capture_status(ws)),
                 asyncio.create_task(self._send_frames(ws, state)),
                 asyncio.create_task(self._recv_input(ws, state)),
             ]
@@ -1947,6 +2031,21 @@ class WebViewerServer:
         except Exception as e:
             logger.debug(f"Capture label lookup failed: {e}")
         return ""
+
+    async def _send_capture_status(self, ws):
+        """Report negotiation asynchronously, including while H264 is active.
+
+        This reads cached metadata only; a slow/busy device never stalls the
+        viewer handshake, input loop or launcher.
+        """
+        capture = self._hw.get_capture()
+        last_info = None
+        while True:
+            info = capture.get_cached_info()
+            if info != last_info:
+                await ws.send(json.dumps({"type": "capture_status", "info": info}))
+                last_info = info
+            await asyncio.sleep(0.25)
 
     async def _send_frames(self, ws, state: dict):
         """Stream JPEG frames: fixed-pace for LAN, adaptive for WAN."""

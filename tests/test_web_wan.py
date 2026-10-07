@@ -22,6 +22,9 @@ from tests.test_web_auth import _DummyHardware, _free_port
 class _FrameCapture:
     """Dummy capture that always has a (fake) JPEG frame available."""
 
+    def get_cached_info(self):
+        return {"status": "ready", "width": 640, "height": 480}
+
     def start_capture_thread(self):
         pass
 

@@ -279,12 +279,15 @@ class ScreenCapture:
         # Capture thread state
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.RLock()
         self._latest_frame: np.ndarray | None = None
         self._frame_seq = 0  # bumped for every new frame stored by the loop
         self._running = False
+        self._negotiated_info: dict | None = None
 
     def _open_device(self):
         """Open the capture device and apply requested resolution."""
+        self._negotiated_info = None
         device = self._device
         if device is None:
             device = detect_capture_device()
@@ -312,11 +315,19 @@ class ScreenCapture:
         self._cap.set(cv2.CAP_PROP_FOURCC, req_fourcc_int)
 
         if self._req_width is not None and self._req_height is not None:
-            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._req_width)
-            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._req_height)
+            # Avoid redundant mode renegotiations on a slow Windows backend.
+            if int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)) != self._req_width:
+                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._req_width)
+            if int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) != self._req_height:
+                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._req_height)
 
         actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if (self._req_width is not None and self._req_height is not None
+                and (actual_w, actual_h) != (self._req_width, self._req_height)):
+            logger.warning(
+                "Capture resolution mismatch: requested %sx%s, actual %sx%s",
+                self._req_width, self._req_height, actual_w, actual_h)
         actual_fourcc_int = int(self._cap.get(cv2.CAP_PROP_FOURCC))
         actual_fourcc = _fourcc_int_to_str(actual_fourcc_int)
         backend_name = self._cap.getBackendName()
@@ -351,6 +362,28 @@ class ScreenCapture:
         logger.info(
             f"Opened capture device: {device} ({actual_w}x{actual_h}, "
             f"fourcc={actual_fourcc})")
+        self._negotiated_info = {
+            "width": actual_w, "height": actual_h,
+            "requested_width": self._req_width,
+            "requested_height": self._req_height,
+            "resolution_matches_request": (
+                (self._req_width is None or actual_w == self._req_width)
+                and (self._req_height is None or actual_h == self._req_height)),
+        }
+
+    def get_cached_info(self) -> dict:
+        """Return negotiation status without opening or querying hardware.
+
+        Safe to poll during a slow device open; the complete status is published
+        atomically only when resolution negotiation finishes.
+        """
+        info = self._negotiated_info
+        if info is not None:
+            return {"status": "ready", **info}
+        return {"status": "pending", "width": None, "height": None,
+                "requested_width": self._req_width,
+                "requested_height": self._req_height,
+                "resolution_matches_request": None}
 
     def _ensure_open(self):
         """Open capture device if not already open."""
@@ -359,6 +392,10 @@ class ScreenCapture:
         self._open_device()
 
     def start_capture_thread(self):
+        with self._lifecycle_lock:
+            self._start_capture_thread()
+
+    def _start_capture_thread(self):
         """Start the background capture thread.
 
         Use get_latest_frame() or get_frame_jpeg() to retrieve frames.
@@ -378,6 +415,10 @@ class ScreenCapture:
         logger.info("Capture thread started")
 
     def stop_capture_thread(self):
+        with self._lifecycle_lock:
+            self._stop_capture_thread()
+
+    def _stop_capture_thread(self):
         """Stop the background capture thread."""
         self._running = False
         if self._thread is not None:
@@ -537,12 +578,42 @@ class ScreenCapture:
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return Image.fromarray(frame_rgb)
 
+    def capture_fresh_jpeg(self, quality: int = 85,
+                           timeout: float = 2.0) -> tuple[bytes, int, int]:
+        """Wait for a frame captured after this request, never serve a cache.
+
+        Serialise against viewer open/close so disconnecting its last client
+        cannot stop capture while an API snapshot is waiting for a new frame.
+        The timeout covers frame delivery after device startup.
+        """
+        with self._lifecycle_lock:
+            last_seq = self._frame_seq
+            self.ensure_streaming()
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                frame, _seq = self.get_frame_if_newer(last_seq)
+                if frame is not None:
+                    h, w = frame.shape[:2]
+                    ret, buf = cv2.imencode(
+                        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                    if not ret:
+                        raise RuntimeError("Failed to encode fresh capture frame")
+                    return buf.tobytes(), w, h
+                time.sleep(0.01)
+            raise TimeoutError("No new capture frame received after snapshot request")
+
     def close(self):
         """Release the capture device and stop capture thread."""
-        self.stop_capture_thread()
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
+        with self._lifecycle_lock:
+            self.stop_capture_thread()
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
+            self._latest_frame = None
+            self._latest_jpeg = None
+            self._crop_rect = None
+            self._crop_frame_counter = 0
+            self._negotiated_info = None
 
     def switch_device(self, device: int | str):
         """Switch to a different capture device, restarting capture if active."""
@@ -577,6 +648,8 @@ class ScreenCapture:
             "device": str(self._device),
             "width": int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
             "height": int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            "requested_width": self._req_width,
+            "requested_height": self._req_height,
             "fps": self._cap.get(cv2.CAP_PROP_FPS),
             "backend": backend,
             "fourcc": fourcc_str,
@@ -584,6 +657,9 @@ class ScreenCapture:
             "autocrop": self._autocrop,
             "preview": self._running,
         }
+        info["resolution_matches_request"] = (
+            (self._req_width is None or info["width"] == self._req_width)
+            and (self._req_height is None or info["height"] == self._req_height))
         if self._crop_rect is not None:
             y1, y2, x1, x2 = self._crop_rect
             info["crop_rect"] = {"x1": x1, "y1": y1, "x2": x2, "y2": y2,
