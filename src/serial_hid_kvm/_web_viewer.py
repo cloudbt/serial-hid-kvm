@@ -298,7 +298,7 @@ const hint = document.getElementById("hint");
 document.getElementById("btnFs").hidden =
   new URLSearchParams(location.search).has("kiosk");
 
-let toolbarHidden = true;   // toolbar starts hidden; Ctrl+Alt+Enter toggles it
+let toolbarHidden = false;   // toolbar starts visible; Ctrl+Alt+Enter toggles it
 let hintTimer = null;
 
 let ws = null;
@@ -1465,7 +1465,7 @@ document.getElementById("btnRec").addEventListener("click", () => {
 });
 
 // --- Toolbar show/hide hotkey (Ctrl+Alt+Enter) ---
-// The toolbar is hidden by default so it never overlaps the target's top edge.
+// The toolbar is visible by default.
 // Ctrl+Alt+Enter toggles it; the combo is captured at the window level (capture
 // phase) and swallowed so it is never forwarded to the target.
 function showHint(text) {
@@ -1781,9 +1781,7 @@ document.getElementById("rtcQuality").addEventListener("change", () => {
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
 
 // --- Start ---
-document.body.classList.add("tb-hidden");   // toolbar hidden until Ctrl+Alt+Enter
 updateCursor();                             // apply default cursor visibility
-showHint("Ctrl+Alt+Enter: toolbar");
 container.focus();
 connect();
 

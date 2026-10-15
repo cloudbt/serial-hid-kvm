@@ -454,6 +454,8 @@ Then open `http://localhost:9330` in a browser. To allow access from other machi
 - **Direct** (native) video mode for maximum smoothness when the browser is on the same machine as the capture card
 - Runs alongside the API server and preview window simultaneously
 
+The toolbar is visible whenever you open or reload the viewer, without a startup hint. Press **Ctrl+Alt+Enter** to hide or show it.
+
 As with the preview window, the mouse cursor is hidden by default. The **Cursor** button in the toolbar shows a local cursor that tracks your mouse instantly, reducing the feeling of input lag caused by video stream latency.
 
 **Display proportions**: The ratio selector defaults to **Source ratio**, which preserves the received frame's dimensions. Choose **Correct to 3:2** only when a complete 3:2 desktop has been squeezed into a 16:9 stream. This changes the canvas/video display proportions in JPEG, H264 and Direct modes, without changing capture resolution or restoring lost detail. Mouse coordinates still map by fractions of the displayed image. In corrected mode, the native scaling button reads **Width 1:1**, since only horizontal pixels remain 1:1. The **Request** and **Frame** labels distinguish requested capture size from received image size; auto-cropping can also make those dimensions differ. The API's `get_device_info` exposes the negotiated device dimensions, `requested_width`/`requested_height`, and `resolution_matches_request`.
