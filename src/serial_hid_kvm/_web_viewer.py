@@ -401,7 +401,12 @@ function connect() {
     statusEl.textContent = "Connecting…";
   };
   ws.onclose = () => {
-    statusEl.textContent = "Disconnected — reconnecting…";
+    const interrupted = recording || recResumePending;
+    recordingConnectionLost();
+    statusEl.textContent = interrupted
+      ? "Recording interrupted — will record a new file after reconnect (gap in recording)"
+      : "Disconnected — reconnecting…";
+    if (interrupted) showHint(statusEl.textContent);
     setTimeout(connect, 2000);
   };
   ws.onerror = () => { ws.close(); };
@@ -428,6 +433,7 @@ function connect() {
         else if (msg.type === "auth_ok") { onAuthOk(msg); }
         else if (msg.type === "auth_failed") { onAuthFailed(msg); }
         else if (msg.type === "hello") {
+          recConnectionReady = true;
           checkBuild(msg.build);
           if (msg.target_name) {
             document.title = msg.target_name + " · NanoKVM";
@@ -453,6 +459,7 @@ function connect() {
             // A reconnected server starts in stream mode; if we're showing
             // native video, tell it to release the capture device again.
             wsSend({type: "stream", on: false});
+            recordingMediaReady();
           } else if (rtcMode) {
             // The server-side peer connection died with the old socket or
             // server — renegotiate a fresh one.
@@ -532,6 +539,7 @@ async function renderLoop() {
       ctx.drawImage(bmp, 0, 0);
       bmp.close();
       frameCount++;
+      if (!videoMode) recordingMediaReady();
     } catch (e) { /* skip undecodable frame */ }
   }
   _decoding = false;
@@ -973,6 +981,39 @@ let recStream = null;
 let recording = false;
 let recStartTime = 0;
 let recTimer = null;
+let recFinishing = false;
+let recStarting = false;
+let recResumePending = false;
+let recConnectionReady = false;
+let recMediaReady = false;
+
+function recordingConnectionLost() {
+  recConnectionReady = false;
+  recMediaReady = false;
+  if (recording) {
+    recResumePending = true;
+    stopRecording(true);
+  }
+}
+
+function recordingMediaReady() {
+  if (!recConnectionReady) return;
+  recMediaReady = true;
+  maybeResumeRecording();
+}
+
+async function maybeResumeRecording() {
+  if (!recResumePending || !recConnectionReady || !recMediaReady ||
+      recording || recFinishing || recStarting ||
+      !ws || ws.readyState !== WebSocket.OPEN) return;
+  recResumePending = false;
+  await startRecording();
+  if (recording) {
+    const message = "Recording resumed in a new file — disconnected interval is missing";
+    statusEl.textContent = message;
+    showHint(message);
+  }
+}
 
 async function ensureAudioForRecording() {
   if (!audioCfg) return;            // no audio device on this server
@@ -998,7 +1039,19 @@ function pickMimeType() {
 }
 
 async function startRecording() {
-  if (recording) return;
+  if (recording || recFinishing || recStarting) return;
+  recStarting = true;
+  try {
+    await startRecordingSession();
+  } catch (e) {
+    statusEl.textContent = "Cannot start recording: " + e.message;
+    showHint(statusEl.textContent);
+  } finally {
+    recStarting = false;
+  }
+}
+
+async function startRecordingSession() {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     statusEl.textContent = "Cannot record: not connected";
     return;
@@ -1008,12 +1061,18 @@ async function startRecording() {
     return;
   }
   // Video from the active display (canvas in stream mode, <video> in direct).
+  const startSocket = ws;
   recStream = captureDisplayStream();
   // Mix in audio if available.  Remote viewers may have the PCM feed
   // unsubscribed (muted) — turn it on for the recorder; speaker playback
   // stays muted because playGain is untouched.
   if (!IS_LAN && audioCfg && !audioOn) wsSend({type: "audio", on: true});
   await ensureAudioForRecording();
+  if (ws !== startSocket || startSocket.readyState !== WebSocket.OPEN) {
+    for (const t of recStream.getVideoTracks()) t.stop();
+    recStream = null;
+    throw new Error("Connection changed while starting recording");
+  }
   if (recDest) {
     for (const t of recDest.stream.getAudioTracks()) recStream.addTrack(t);
   }
@@ -1032,20 +1091,52 @@ async function startRecording() {
     return;
   }
 
+  // Bind this session to its original connection. Reconnecting must never
+  // send a headerless continuation into a different server recording.
+  const recSocket = ws;
+  const sessionStream = recStream;
+  let pendingChunks = Promise.resolve();
+  let chunkError = null;
   mediaRecorder.ondataavailable = (ev) => {
     if (!ev.data || ev.data.size === 0) return;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ev.data.arrayBuffer().then((buf) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    pendingChunks = pendingChunks.then(async () => {
+      const buf = await ev.data.arrayBuffer();
+      if (recSocket.readyState !== WebSocket.OPEN)
+        throw new Error("Recording connection lost; recording is incomplete");
       const out = new Uint8Array(buf.byteLength + 1);
       out[0] = 0x10;                // client→server recording-chunk tag
       out.set(new Uint8Array(buf), 1);
-      ws.send(out.buffer);
-    });
+      recSocket.send(out.buffer);
+    }).catch((e) => { chunkError = e; });
   };
-  mediaRecorder.onstop = () => {
-    if (ws && ws.readyState === WebSocket.OPEN)
-      ws.send(JSON.stringify({type: "rec_stop"}));
+  mediaRecorder.onstop = async () => {
+    recFinishing = true;
+    recording = false;
+    clearInterval(recTimer);
+    const btn = document.getElementById("btnRec");
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    // dataavailable precedes stop, but Blob.arrayBuffer() is asynchronous.
+    // The server must receive ALL chunks before it closes the output file.
+    try {
+      await pendingChunks;
+      if (recSocket.readyState !== WebSocket.OPEN)
+        throw new Error("Connection lost before recording could be saved");
+      recSocket.send(JSON.stringify({type: "rec_stop"}));
+      if (chunkError) throw chunkError;
+    } catch (e) {
+      statusEl.textContent = "Recording incomplete: " + e.message;
+      showHint(statusEl.textContent);
+    } finally {
+      for (const t of sessionStream.getVideoTracks()) t.stop();
+      recStream = null;
+      if (!IS_LAN && audioCfg && !audioOn) wsSend({type: "audio", on: false});
+      recFinishing = false;
+      btn.disabled = false;
+      btn.classList.remove("recording");
+      btn.textContent = recResumePending ? "Cancel auto-record" : "⏺ Record";
+      maybeResumeRecording();
+    }
   };
 
   mediaRecorder.start(1000);        // flush a chunk every second
@@ -1063,22 +1154,25 @@ async function startRecording() {
   recTimer = setInterval(tick, 500);
 }
 
-function stopRecording() {
+function stopRecording(forReconnect = false) {
+  if (!forReconnect) recResumePending = false;
   if (!recording) return;
   recording = false;
+  recFinishing = true;
   clearInterval(recTimer);
   recTimer = null;
-  // Drop the recorder-only PCM subscription again (remote viewers).
-  if (!IS_LAN && audioCfg && !audioOn) wsSend({type: "audio", on: false});
-  try { mediaRecorder.stop(); } catch (e) {}
-  if (recStream) {
-    for (const t of recStream.getVideoTracks()) t.stop();
-    recStream = null;
-  }
   const btn = document.getElementById("btnRec");
-  btn.classList.remove("recording");
-  btn.textContent = "⏺ Record";
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  // Keep tracks alive until MediaRecorder has emitted its final chunk.
+  mediaRecorder.stop();
 }
+
+window.addEventListener("beforeunload", (ev) => {
+  if (!recording && !recFinishing) return;
+  ev.preventDefault();
+  ev.returnValue = "";
+});
 
 function captureDisplayStream() {
   if (videoMode) {
@@ -1089,7 +1183,11 @@ function captureDisplayStream() {
 }
 
 document.getElementById("btnRec").addEventListener("click", () => {
-  if (recording) stopRecording(); else startRecording();
+  if (recResumePending) {
+    recResumePending = false;
+    document.getElementById("btnRec").textContent = "⏺ Record";
+    statusEl.textContent = "Automatic recording resume cancelled";
+  } else if (recording) stopRecording(); else startRecording();
   container.focus();
 });
 
@@ -1355,6 +1453,7 @@ async function enableRtc() {
     btn.textContent = "H264 ●";
     fpsEl.textContent = "h264";
     statusEl.textContent = "H.264 (WebRTC)";
+    recordingMediaReady();
   } catch (e) {
     _rtcWait = null;
     if (rtcPc) { try { rtcPc.close(); } catch (e2) {} rtcPc = null; }
