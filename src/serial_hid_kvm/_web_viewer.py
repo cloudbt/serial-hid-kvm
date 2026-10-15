@@ -22,12 +22,15 @@ import secrets
 import socket
 import ssl
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import websockets
 from websockets.http11 import Response
 
 from ._audio import AudioCapture
+from ._recording import convert_recording
+from ._recording_session import RecordingSessions
 from .hid_protocol import (
     build_keyboard_report,
     build_mouse_abs_packet,
@@ -244,6 +247,14 @@ body.tb-hidden #container{height:100%}
   <!-- <button id="btnViewOnly" title="Toggle view-only mode (no input sent)">View Only</button> -->
   <button id="btnAudio" title="Toggle audio playback" style="display:none">&#x1f507; Audio</button>
   <button id="btnRec" title="Record screen + audio to the server's recording folder">&#x23fa; Record</button>
+  <select id="recAudioSource" aria-label="Recording audio source" title="Stop recording before changing audio source">
+    <option value="mic">Host Mic</option><option value="hdmi">Target HDMI</option><option value="none">No audio</option>
+  </select>
+  <select id="recAudioDevice" aria-label="Recording audio device" title="Select the input on the computer running this browser" style="max-width:190px"></select>
+  <button id="btnRecInputs" title="Allow audio access and refresh input device names">Inputs</button>
+  <button id="btnRecCheck" title="Check selected audio input without saving a recording">Check audio</button>
+  <meter id="recAudioLevel" aria-label="Recording input level" min="0" max="1" value="0" style="width:65px"></meter>
+  <span id="recAudioStatus" style="font-size:12px" role="status"></span>
   <button id="btnCursor" title="Toggle local cursor visibility">Cursor</button>
   <button id="btnScale" title="Toggle 1:1 / Fit scaling">Fit</button>
   <select id="displayAspect" aria-label="Display aspect ratio" title="Display proportion correction; does not change capture resolution">
@@ -384,7 +395,13 @@ let _build = null;
 function checkBuild(b) {
   if (!b) return;
   if (_build === null) { _build = b; return; }
-  if (b !== _build) location.reload();
+  if (b !== _build) {
+    if (recording || recFinishing || recStarting || recUpload) {
+      showHint("Viewer update available — finish saving recording before refreshing");
+      return;
+    }
+    location.reload();
+  }
 }
 
 // --- WebSocket ---
@@ -400,12 +417,14 @@ function connect() {
     triedToken = false;
     statusEl.textContent = "Connecting…";
   };
-  ws.onclose = () => {
-    const interrupted = recording || recResumePending;
+  ws.onclose = (ev) => {
+    const interrupted = recording || recFinishing;
     recordingConnectionLost();
-    statusEl.textContent = interrupted
-      ? "Recording interrupted — will record a new file after reconnect (gap in recording)"
+    statusEl.textContent = recording
+      ? "Picture disconnected — recording continues locally; upload will resume"
+      : recFinishing ? "Disconnected — recording stopped; waiting to upload"
       : "Disconnected — reconnecting…";
+    console.warn("Viewer connection closed", ev.code, ev.reason);
     if (interrupted) showHint(statusEl.textContent);
     setTimeout(connect, 2000);
   };
@@ -434,6 +453,7 @@ function connect() {
         else if (msg.type === "auth_failed") { onAuthFailed(msg); }
         else if (msg.type === "hello") {
           recConnectionReady = true;
+          attachRecordingUpload();
           checkBuild(msg.build);
           if (msg.target_name) {
             document.title = msg.target_name + " · NanoKVM";
@@ -472,7 +492,10 @@ function connect() {
           // while the viewer is open.
         }
         else if (msg.type === "capture_status") { applyCaptureStatus(msg.info); }
-        else if (msg.type === "audio_config") { setupAudioConfig(msg); }
+        else if (msg.type === "audio_config") {
+          setupAudioConfig(msg);
+          updateRecordingDevices();
+        }
         else if (msg.type === "capture_device") { serverCaptureLabel = msg.label || ""; }
         else if (msg.type === "webrtc_answer") {
           // Only apply the answer that matches the current offer; a late
@@ -491,12 +514,23 @@ function connect() {
             if (toolbarHidden) showHint("WebRTC error: " + msg.error);
           }
         }
+        else if (["rec_session_ready", "rec_ack", "rec_session_saved", "rec_session_error"].includes(msg.type)) {
+          recordingUploadEvent(msg);
+        }
         else if (msg.type === "rec_saved") {
-          statusEl.textContent = "Saved: " + msg.path;
-          if (toolbarHidden) showHint("Saved: " + msg.path);
-          setTimeout(() => { statusEl.textContent = "Connected"; }, 6000);
+          statusEl.textContent = "WebM saved; MP4 queued: " + msg.path;
+          showHint(statusEl.textContent);
+        }
+        else if (msg.type === "rec_exported") {
+          statusEl.textContent = "MP4 verified: " + msg.path;
+          showHint(statusEl.textContent);
+        }
+        else if (msg.type === "rec_export_error") {
+          statusEl.textContent = "MP4 failed; WebM kept: " + msg.error;
+          showHint(statusEl.textContent);
         }
         else if (msg.type === "rec_error") {
+          if (recording) stopRecording();
           statusEl.textContent = "Recording error: " + msg.error;
           if (toolbarHidden) showHint("Recording error: " + msg.error);
         }
@@ -965,7 +999,8 @@ document.getElementById("btnAudio").addEventListener("click", async () => {
   // (LAN keeps the always-on feed, mute is just a local gain).
   if (!IS_LAN) {
     if (audioOn) wsSend({type: "audio", on: true});
-    else if (!recording) wsSend({type: "audio", on: false});
+    else if (!recording || document.getElementById("recAudioSource").value !== "hdmi")
+      wsSend({type: "audio", on: false});
   }
   btn.textContent = (audioOn ? "\u{1f50a}" : "\u{1f507}") + " Audio";
   btn.classList.toggle("active", audioOn);
@@ -986,33 +1021,227 @@ let recStarting = false;
 let recResumePending = false;
 let recConnectionReady = false;
 let recMediaReady = false;
+let recAudioSession = null;
+let recAudioPreview = null;
+let recInputDevices = [];
+let recUpload = null;
+let recPaintTimer = null;
+let recPictureGap = false;
+
+function attachRecordingUpload() {
+  if (!recUpload || !recConnectionReady || !ws || ws.readyState !== WebSocket.OPEN) return;
+  recUpload.ready = false;
+  recUpload.inflight = null;
+  recUpload.finishSent = false;
+  ws.send(JSON.stringify({type:"rec_session_start", session:recUpload.id, filename:recUpload.filename}));
+}
+function pumpRecordingUpload() {
+  const u = recUpload;
+  if (!u || u.failed || !u.ready || !recConnectionReady || !ws || ws.readyState !== WebSocket.OPEN ||
+      u.inflight !== null) return;
+  if (u.queue.length) {
+    const block = u.queue[0];
+    const packet = new Uint8Array(block.data.byteLength + 5);
+    packet[0] = 0x11;
+    new DataView(packet.buffer).setUint32(1, block.sequence);
+    packet.set(block.data, 5);
+    u.inflight = block.sequence;
+    try { ws.send(packet.buffer); }
+    catch (e) { u.inflight = null; u.ready = false; }
+  } else if (u.finishing && !u.finishSent) {
+    u.finishSent = true;
+    ws.send(JSON.stringify({type:"rec_session_finish", session:u.id, next:u.next}));
+  }
+}
+function recordingUploadEvent(msg) {
+  const u = recUpload;
+  if (!u || msg.session !== u.id) return;
+  if (msg.type === "rec_session_error") {
+    u.failed = true;
+    statusEl.textContent = "Recording upload error; keep this page open: " + msg.error;
+    showHint(statusEl.textContent);
+    if (recording) stopRecording();
+    return;
+  }
+  if (msg.type === "rec_session_saved") {
+    recUpload = null;
+    recFinishing = false;
+    lockRecordingAudio(false);
+    const btn = document.getElementById("btnRec");
+    btn.disabled = false;
+    btn.classList.remove("recording");
+    btn.textContent = "⏺ Record";
+    statusEl.textContent = "Recording saved; one MP4 queued: " + msg.path;
+    showHint(statusEl.textContent);
+    return;
+  }
+  if (msg.type === "rec_session_ready" || msg.type === "rec_ack") {
+    if (msg.type === "rec_ack" && msg.next <= u.ack) return;
+    if (!Number.isInteger(msg.next) || msg.next < u.ack || msg.next > u.next) {
+      u.failed = true;
+      statusEl.textContent = "Recording upload offset mismatch; keep this page open";
+      showHint(statusEl.textContent);
+      if (recording) stopRecording();
+      return;
+    }
+    u.ack = msg.next;
+    while (u.queue.length && u.queue[0].sequence < msg.next)
+      u.bytes -= u.queue.shift().data.byteLength;
+    u.inflight = null;
+    u.ready = true;
+    pumpRecordingUpload();
+  }
+}
+
+const recSourceSelect = document.getElementById("recAudioSource");
+const recDeviceSelect = document.getElementById("recAudioDevice");
+const recAudioStatus = document.getElementById("recAudioStatus");
+function recAudioKey() { return "recording-audio:" + location.host; }
+function rememberRecordingAudio() {
+  try { localStorage.setItem(recAudioKey(), JSON.stringify({
+    source: recSourceSelect.value, device: recDeviceSelect.value})); } catch (e) {}
+}
+function updateRecordingDevices(preferred) {
+  const source = recSourceSelect.value;
+  const old = preferred === undefined ? recDeviceSelect.value : preferred;
+  recDeviceSelect.replaceChildren();
+  const add = (value, label) => recDeviceSelect.add(new Option(label, value));
+  if (source === "mic") add("default", "Default Host microphone");
+  else if (source === "hdmi") {
+    add("", "Select Target HDMI input…");
+    if (audioCfg) add("server", "Target HDMI (server capture)");
+  }
+  if (source !== "none") {
+    for (const d of recInputDevices) {
+      if (d.deviceId === "default" || d.deviceId === "communications") continue;
+      add(d.deviceId, (d.label || "Audio input") + " · " + d.deviceId.slice(-6));
+    }
+    if ([...recDeviceSelect.options].some(o => o.value === old)) recDeviceSelect.value = old;
+    else if (source === "hdmi" && audioCfg) recDeviceSelect.value = "server";
+  }
+  recDeviceSelect.hidden = source === "none";
+}
+async function refreshRecordingInputs(requestPermission = false) {
+  if (!navigator.mediaDevices) throw new Error("Audio input needs localhost or HTTPS");
+  if (requestPermission) {
+    // User explicitly clicked Inputs to grant permission and reveal names.
+    const permission = await navigator.mediaDevices.getUserMedia({audio:true, video:false});
+    permission.getTracks().forEach(t => t.stop());
+  }
+  recInputDevices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audioinput");
+  updateRecordingDevices();
+}
+function lockRecordingAudio(locked) {
+  for (const id of ["recAudioSource", "recAudioDevice", "btnRecInputs", "btnRecCheck"])
+    document.getElementById(id).disabled = locked;
+}
+async function openRecordingAudio() {
+  const source = recSourceSelect.value;
+  if (source === "none") return {tracks:[], close(){}};
+  let input, owned = false, meterCtx = null, meterTimer = null;
+  if (source === "hdmi" && recDeviceSelect.value === "server") {
+    if (!audioCfg) throw new Error("Target HDMI audio is not available");
+    if (!IS_LAN) wsSend({type:"audio", on:true});
+    await ensureAudioForRecording();
+    input = recDest.stream;
+  } else {
+    if (!navigator.mediaDevices) throw new Error("Microphone access needs localhost or HTTPS");
+    const id = recDeviceSelect.value;
+    if (source === "hdmi" && (!id || id === "default"))
+      throw new Error("Click Inputs, then select this Target's HDMI capture audio device");
+    const audio = {echoCancellation:false, noiseSuppression:false, autoGainControl:false};
+    if (id && id !== "default") audio.deviceId = {exact:id};
+    input = await navigator.mediaDevices.getUserMedia({video:false, audio});
+    owned = true;
+  }
+  const close = () => {
+    clearInterval(meterTimer);
+    if (meterCtx) meterCtx.close().catch(() => {});
+    if (owned) input.getTracks().forEach(t => t.stop());
+    if (source === "hdmi" && !IS_LAN && !audioOn) wsSend({type:"audio", on:false});
+    document.getElementById("recAudioLevel").value = 0;
+  };
+  const tracks = input.getAudioTracks();
+  if (!tracks.length || tracks.some(t => t.readyState !== "live")) {
+    close(); throw new Error("Selected audio input has no live track");
+  }
+  try {
+    // The meter is never connected to speakers: no microphone monitoring/echo.
+    meterCtx = new AudioContext();
+    await meterCtx.resume();
+    const analyser = meterCtx.createAnalyser();
+    analyser.fftSize = 512;
+    meterCtx.createMediaStreamSource(input).connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    meterTimer = setInterval(() => {
+      analyser.getFloatTimeDomainData(samples);
+      const rms = Math.sqrt(samples.reduce((sum, x) => sum + x*x, 0) / samples.length);
+      document.getElementById("recAudioLevel").value = Math.min(1, rms * 4);
+    }, 100);
+  } catch (e) { close(); throw e; }
+  recAudioStatus.textContent = source === "mic" ? "Host Mic ready" : "Target HDMI ready";
+  return {tracks, close};
+}
+function closeRecordingPreview() {
+  if (recAudioPreview) recAudioPreview.close();
+  recAudioPreview = null;
+  document.getElementById("btnRecCheck").textContent = "Check audio";
+}
+recSourceSelect.addEventListener("change", () => {
+  closeRecordingPreview(); updateRecordingDevices(); rememberRecordingAudio();
+  recAudioStatus.textContent = "";
+});
+recDeviceSelect.addEventListener("change", () => {
+  closeRecordingPreview(); rememberRecordingAudio(); recAudioStatus.textContent = "";
+});
+document.getElementById("btnRecInputs").addEventListener("click", async () => {
+  lockRecordingAudio(true);
+  document.getElementById("btnRec").disabled = true;
+  try { await refreshRecordingInputs(true); }
+  catch (e) { recAudioStatus.textContent = "Audio access failed: " + e.message; }
+  finally { lockRecordingAudio(false); document.getElementById("btnRec").disabled = false; }
+});
+document.getElementById("btnRecCheck").addEventListener("click", async () => {
+  if (recAudioPreview) { closeRecordingPreview(); recAudioStatus.textContent = "Audio check stopped"; return; }
+  lockRecordingAudio(true);
+  document.getElementById("btnRec").disabled = true;
+  try {
+    recAudioPreview = await openRecordingAudio();
+    document.getElementById("btnRecCheck").textContent = "Stop check";
+    await refreshRecordingInputs();
+  } catch (e) { recAudioStatus.textContent = "Audio check failed: " + e.message; }
+  finally { lockRecordingAudio(false); document.getElementById("btnRec").disabled = false; }
+});
+try {
+  const saved = JSON.parse(localStorage.getItem(recAudioKey()) || "null");
+  if (saved && ["mic","hdmi","none"].includes(saved.source)) recSourceSelect.value = saved.source;
+  updateRecordingDevices();
+  refreshRecordingInputs().then(() => {
+    if (saved) updateRecordingDevices(saved.device);
+  }).catch(() => {});
+} catch (e) { updateRecordingDevices(); }
 
 function recordingConnectionLost() {
   recConnectionReady = false;
   recMediaReady = false;
-  if (recording) {
-    recResumePending = true;
-    stopRecording(true);
+  recPictureGap = true;
+  if (recUpload) {
+    recUpload.ready = false;
+    recUpload.inflight = null;
+    recUpload.finishSent = false;
   }
 }
 
 function recordingMediaReady() {
   if (!recConnectionReady) return;
   recMediaReady = true;
-  maybeResumeRecording();
+  recPictureGap = false;
 }
 
 async function maybeResumeRecording() {
-  if (!recResumePending || !recConnectionReady || !recMediaReady ||
-      recording || recFinishing || recStarting ||
-      !ws || ws.readyState !== WebSocket.OPEN) return;
-  recResumePending = false;
-  await startRecording();
-  if (recording) {
-    const message = "Recording resumed in a new file — disconnected interval is missing";
-    statusEl.textContent = message;
-    showHint(message);
-  }
+  // Retained as a no-op for callers from older video-mode code. The recorder
+  // is continuous now; reconnect resumes upload, never creates another file.
+  pumpRecordingUpload();
 }
 
 async function ensureAudioForRecording() {
@@ -1027,8 +1256,8 @@ async function ensureAudioForRecording() {
 
 function pickMimeType() {
   const prefs = [
-    "video/webm;codecs=vp9,opus",
     "video/webm;codecs=vp8,opus",
+    "video/webm;codecs=vp9,opus",
     "video/webm;codecs=vp8",
     "video/webm",
   ];
@@ -1038,12 +1267,28 @@ function pickMimeType() {
   return "";
 }
 
+function recordingFilename(now = new Date()) {
+  // Fixed JST (UTC+09:00), independent of the browser computer's timezone.
+  const stamp = new Date(now.getTime() + 9*60*60*1000).toISOString()
+    .replace(/Z$/, "-JST").replace(/[:.]/g, "-");
+  return "recording-" + stamp + ".webm";
+}
+
 async function startRecording() {
   if (recording || recFinishing || recStarting) return;
   recStarting = true;
   try {
     await startRecordingSession();
   } catch (e) {
+    if (recAudioSession) recAudioSession.close();
+    recAudioSession = null;
+    if (recStream) recStream.getVideoTracks().forEach(t => t.stop());
+    recStream = null;
+    clearInterval(recPaintTimer);
+    recPaintTimer = null;
+    recUpload = null;
+    lockRecordingAudio(false);
+    document.getElementById("btnRec").disabled = false;
     statusEl.textContent = "Cannot start recording: " + e.message;
     showHint(statusEl.textContent);
   } finally {
@@ -1062,52 +1307,52 @@ async function startRecordingSession() {
   }
   // Video from the active display (canvas in stream mode, <video> in direct).
   const startSocket = ws;
+  closeRecordingPreview();
+  lockRecordingAudio(true);
+  document.getElementById("btnRec").disabled = true;
+  recAudioSession = await openRecordingAudio();
   recStream = captureDisplayStream();
-  // Mix in audio if available.  Remote viewers may have the PCM feed
-  // unsubscribed (muted) — turn it on for the recorder; speaker playback
-  // stays muted because playGain is untouched.
-  if (!IS_LAN && audioCfg && !audioOn) wsSend({type: "audio", on: true});
-  await ensureAudioForRecording();
+  // Explicitly remove any audio from <video>.captureStream(): exactly the
+  // chosen input (or no audio) is recorded, never a second HDMI track.
+  for (const t of recStream.getAudioTracks()) recStream.removeTrack(t);
   if (ws !== startSocket || startSocket.readyState !== WebSocket.OPEN) {
     for (const t of recStream.getVideoTracks()) t.stop();
     recStream = null;
     throw new Error("Connection changed while starting recording");
   }
-  if (recDest) {
-    for (const t of recDest.stream.getAudioTracks()) recStream.addTrack(t);
-  }
+  for (const t of recAudioSession.tracks) recStream.addTrack(t);
 
   const mimeType = pickMimeType();
-  const filename = "recording-" +
-    new Date().toISOString().replace(/[:.]/g, "-") + ".webm";
-  ws.send(JSON.stringify({type: "rec_start", filename}));
+  const filename = recordingFilename();
+  mediaRecorder = new MediaRecorder(recStream, mimeType ? {mimeType} : undefined);
+  recUpload = {id:crypto.randomUUID().replace(/-/g,""), filename,
+    queue:[], next:0, ack:0, bytes:0, ready:false, inflight:null, finishing:false, finishSent:false};
+  attachRecordingUpload();
 
-  try {
-    mediaRecorder = new MediaRecorder(recStream,
-      mimeType ? {mimeType} : undefined);
-  } catch (e) {
-    statusEl.textContent = "Recording unsupported: " + e;
-    ws.send(JSON.stringify({type: "rec_stop"}));
-    return;
-  }
-
-  // Bind this session to its original connection. Reconnecting must never
-  // send a headerless continuation into a different server recording.
-  const recSocket = ws;
   const sessionStream = recStream;
+  const sessionAudio = recAudioSession;
   let pendingChunks = Promise.resolve();
-  let chunkError = null;
+  const sessionUpload = recUpload;
   mediaRecorder.ondataavailable = (ev) => {
     if (!ev.data || ev.data.size === 0) return;
     pendingChunks = pendingChunks.then(async () => {
       const buf = await ev.data.arrayBuffer();
-      if (recSocket.readyState !== WebSocket.OPEN)
-        throw new Error("Recording connection lost; recording is incomplete");
-      const out = new Uint8Array(buf.byteLength + 1);
-      out[0] = 0x10;                // client→server recording-chunk tag
-      out.set(new Uint8Array(buf), 1);
-      recSocket.send(out.buffer);
-    }).catch((e) => { chunkError = e; });
+      for (let offset = 0; offset < buf.byteLength; offset += 256*1024) {
+        const data = new Uint8Array(buf.slice(offset, offset + 256*1024));
+        sessionUpload.queue.push({sequence:sessionUpload.next++, data});
+        sessionUpload.bytes += data.byteLength;
+      }
+      pumpRecordingUpload();
+      if (sessionUpload.bytes > 128*1024*1024 && recording) {
+        stopRecording();
+        showHint("Recording stopped: 128 MB awaiting upload. Keep this page open to save.");
+      }
+    }).catch((e) => {
+      sessionUpload.failed = true;
+      statusEl.textContent = "Recording data error: " + e.message;
+      showHint(statusEl.textContent);
+      if (recording) stopRecording();
+    });
   };
   mediaRecorder.onstop = async () => {
     recFinishing = true;
@@ -1120,29 +1365,36 @@ async function startRecordingSession() {
     // The server must receive ALL chunks before it closes the output file.
     try {
       await pendingChunks;
-      if (recSocket.readyState !== WebSocket.OPEN)
-        throw new Error("Connection lost before recording could be saved");
-      recSocket.send(JSON.stringify({type: "rec_stop"}));
-      if (chunkError) throw chunkError;
+      sessionUpload.finishing = true;
+      pumpRecordingUpload();
     } catch (e) {
       statusEl.textContent = "Recording incomplete: " + e.message;
       showHint(statusEl.textContent);
     } finally {
       for (const t of sessionStream.getVideoTracks()) t.stop();
+      clearInterval(recPaintTimer);
+      recPaintTimer = null;
+      sessionAudio.close();
+      if (!recAudioStatus.textContent.startsWith("Audio input lost"))
+        recAudioStatus.textContent = "Input released";
+      recAudioSession = null;
       recStream = null;
-      if (!IS_LAN && audioCfg && !audioOn) wsSend({type: "audio", on: false});
-      recFinishing = false;
-      btn.disabled = false;
-      btn.classList.remove("recording");
-      btn.textContent = recResumePending ? "Cancel auto-record" : "⏺ Record";
-      maybeResumeRecording();
+      // Keep Saving… until the server confirms every block and manual finish.
+      btn.textContent = recConnectionReady ? "Saving…" : "Waiting to upload…";
     }
   };
 
   mediaRecorder.start(1000);        // flush a chunk every second
   recording = true;
+  for (const track of sessionAudio.tracks) track.addEventListener("ended", () => {
+    if (!recording || recAudioSession !== sessionAudio) return;
+    stopRecording();
+    recAudioStatus.textContent = "Audio input lost — recording stopped. Select an input and restart.";
+    showHint(recAudioStatus.textContent);
+  }, {once:true});
   recStartTime = Date.now();
   const btn = document.getElementById("btnRec");
+  btn.disabled = false;
   btn.classList.add("recording");
   const tick = () => {
     const s = Math.floor((Date.now() - recStartTime) / 1000);
@@ -1173,13 +1425,34 @@ window.addEventListener("beforeunload", (ev) => {
   ev.preventDefault();
   ev.returnValue = "";
 });
+window.addEventListener("pagehide", closeRecordingPreview);
 
 function captureDisplayStream() {
-  if (videoMode) {
-    if (video.captureStream) return video.captureStream();
-    if (video.mozCaptureStream) return video.mozCaptureStream();
-  }
-  return canvas.captureStream();
+  // Stable video track across JPEG/WebRTC reconnects and source track ends.
+  // Drawing on our own canvas preserves the last picture while audio keeps
+  // its original continuous timeline. Never draw UI text onto the KVM canvas.
+  const surface = document.createElement("canvas");
+  surface.width = mediaW();
+  surface.height = mediaH();
+  const paint = surface.getContext("2d");
+  const draw = () => {
+    try {
+      const source = videoMode ? video : canvas;
+      if (!recPictureGap) paint.drawImage(source, 0, 0, surface.width, surface.height);
+      if (recPictureGap) {
+        // Repaint the last frame so canvas.captureStream keeps ticking.
+        paint.drawImage(surface, 0, 0);
+        paint.fillStyle = "#a00000";
+        paint.fillRect(0, 0, 300, 28);
+        paint.fillStyle = "white";
+        paint.font = "16px sans-serif";
+        paint.fillText("Picture disconnected — last received frame", 5, 20);
+      }
+    } catch (e) { /* Keep the previous picture during video source swaps. */ }
+  };
+  draw();
+  recPaintTimer = setInterval(draw, 1000/30);
+  return surface.captureStream(30);
 }
 
 document.getElementById("btnRec").addEventListener("click", () => {
@@ -1567,6 +1840,10 @@ class WebViewerServer:
         self._server = None
         self._clients: set = set()
         self._audio = audio
+        self._recording_jobs: set = set()
+        self._conversion_lock = asyncio.Lock()
+        self._recording_sessions = RecordingSessions(config.recording_dir)
+        self._session_exports: dict = {}
         # Number of clients currently consuming the server JPEG stream.  The
         # capture device is only held while this is > 0, so a client switching
         # to "direct" (native getUserMedia) video frees the device for the
@@ -1603,6 +1880,10 @@ class WebViewerServer:
             port,
             process_request=self._process_http,
             ssl=ssl_ctx,
+            compression=None,  # JPEG/WebM are already compressed.
+            ping_interval=20,
+            ping_timeout=90,   # Tolerate temporary busy/background browser work.
+            max_size=8 * 1024 * 1024,
         )
         scheme = "https" if ssl_ctx else "http"
         auth = " (password required)" if self._config.web_password else ""
@@ -1637,6 +1918,31 @@ class WebViewerServer:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        if self._recording_jobs:
+            await asyncio.gather(*list(self._recording_jobs), return_exceptions=True)
+
+    def _export_recording(self, path, ws, destination=None, session=None):
+        """Keep exports alive after a viewer disconnect; serialize CPU work."""
+        async def export():
+            async with self._conversion_lock:
+                try:
+                    if destination is None:
+                        result = await asyncio.to_thread(convert_recording, path)
+                    else:
+                        result = await asyncio.to_thread(convert_recording, path, destination)
+                    message = {"type": "rec_exported", "path": str(result), "session":session}
+                    logger.info("Recording MP4 verified: %s", result)
+                except Exception as exc:
+                    logger.warning("Recording export failed (%s): %s", path, exc)
+                    message = {"type": "rec_export_error", "path": str(path), "error": str(exc), "session":session}
+                try:
+                    await ws.send(json.dumps(message))
+                except Exception:
+                    pass  # Conversion result is also persisted beside the WebM.
+        task = asyncio.create_task(export())
+        self._recording_jobs.add(task)
+        task.add_done_callback(self._recording_jobs.discard)
+        return task
 
     # Pre-encoded PWA assets (immutable after module load)
     _pwa_routes: dict[str, tuple[str, bytes]] = {
@@ -1800,13 +2106,16 @@ class WebViewerServer:
                 # abrupt disconnect) so asyncio doesn't log "Task exception
                 # was never retrieved" for every dead client.
                 if not t.cancelled():
-                    t.exception()
+                    error = t.exception()
+                    if error:
+                        logger.warning("Viewer task ended: %s", error)
         finally:
             self._set_audio(state, False)
             self._clients.discard(ws)
             await self._stop_webrtc(state)
             await self._release_stream(state)
-            logger.info(f"Web client disconnected from {ip} ({len(self._clients)} total)")
+            logger.info("Web client disconnected from %s (%s total); code=%s reason=%s",
+                        ip, len(self._clients), ws.close_code, ws.close_reason)
 
     # Auth throttle: after _AUTH_MAX_FAILS consecutive wrong passwords from
     # one IP, that IP is locked out for _AUTH_LOCKOUT_S seconds.  A client
@@ -2193,7 +2502,7 @@ class WebViewerServer:
                     await ws.send(b"\x01" + jpeg_bytes)
                 except websockets.ConnectionClosed:
                     break
-            next_t += interval
+            next_t += max(interval, 1 / 30) if state.get("recording_session") else interval
             delay = next_t - loop.time()
             if delay > 0:
                 await asyncio.sleep(delay)
@@ -2345,11 +2654,13 @@ class WebViewerServer:
         name = Path(filename or "").name  # drop any directory components
         name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
         if not name or name in (".", ".."):
-            name = "recording-" + time.strftime("%Y%m%d-%H%M%S")
+            now = datetime.now(timezone(timedelta(hours=9)))
+            name = f"recording-{now:%Y-%m-%dT%H-%M-%S}-{now.microsecond // 1000:03d}-JST"
         if not name.lower().endswith(".webm"):
             name += ".webm"
         path = rec_dir / name
-        return open(path, "wb"), path
+        # Colliding names must not truncate another browser's recording.
+        return open(path, "xb"), path
 
     async def _recv_input(self, ws, state: dict):
         """Receive and process input events from the client.
@@ -2366,6 +2677,7 @@ class WebViewerServer:
         ch9329 = self._hw.get_ch9329()
         loop = asyncio.get_running_loop()
         rec_file = None  # open file handle while a recording is in progress
+        upload_session = None
 
         # (is_move, packet) entries.  Consecutive moves collapse to the latest.
         send_queue: list[tuple[bool, bytes]] = []
@@ -2401,6 +2713,16 @@ class WebViewerServer:
                 # Binary frames from the client are screen-recording chunks
                 # (tag byte 0x10 + WebM data), written to the open recording.
                 if not isinstance(message, str):
+                    if upload_session and len(message) > 5 and message[0] == 0x11:
+                        try:
+                            sequence = int.from_bytes(message[1:5], "big")
+                            result = await asyncio.to_thread(
+                                self._recording_sessions.write, upload_session, sequence, message[5:])
+                            await ws.send(json.dumps({"type":"rec_ack", "session":upload_session, "next":result["next"]}))
+                        except Exception as exc:
+                            logger.warning("Recording upload failed (%s): %s", upload_session, exc)
+                            await ws.send(json.dumps({"type":"rec_session_error", "session":upload_session, "error":str(exc)}))
+                        continue
                     if (rec_file is not None and len(message) >= 1
                             and message[0] == 0x10):
                         await loop.run_in_executor(
@@ -2412,6 +2734,37 @@ class WebViewerServer:
                     continue
 
                 ev_type = ev.get("type")
+
+                if ev_type == "rec_session_start":
+                    try:
+                        result = await asyncio.to_thread(self._recording_sessions.attach,
+                                                        ev.get("session"), ev.get("filename"))
+                        upload_session = ev["session"]
+                        state["recording_session"] = not result["finished"]
+                        logger.info("Recording session attached: %s next=%s", upload_session, result["next"])
+                        await ws.send(json.dumps({"type":"rec_session_ready", "session":upload_session,
+                                                  "next":result["next"], "finished":result["finished"]}))
+                    except Exception as exc:
+                        await ws.send(json.dumps({"type":"rec_session_error", "session":ev.get("session"), "error":str(exc)}))
+                    continue
+
+                if ev_type == "rec_session_finish":
+                    try:
+                        if ev.get("session") != upload_session:
+                            raise ValueError("Recording session is not attached")
+                        source, destination = await asyncio.to_thread(self._recording_sessions.finish,
+                                                                     upload_session, ev.get("next"))
+                        state["recording_session"] = False
+                        await ws.send(json.dumps({"type":"rec_session_saved", "session":upload_session,
+                                                  "path":str(destination)}))
+                        if destination.exists():
+                            await ws.send(json.dumps({"type":"rec_exported", "session":upload_session, "path":str(destination)}))
+                        elif upload_session not in self._session_exports or self._session_exports[upload_session].done():
+                            self._session_exports[upload_session] = self._export_recording(source, ws, destination, upload_session)
+                        logger.info("Recording session finished: %s -> %s", upload_session, destination)
+                    except Exception as exc:
+                        await ws.send(json.dumps({"type":"rec_session_error", "session":ev.get("session"), "error":str(exc)}))
+                    continue
 
                 if ev_type == "stream":
                     # Client toggling the server JPEG stream on/off (direct mode
@@ -2448,8 +2801,10 @@ class WebViewerServer:
 
                 elif ev_type == "rec_start":
                     if rec_file is not None:
+                        previous = rec_file.name
                         rec_file.close()
                         rec_file = None
+                        self._export_recording(previous, ws)
                     try:
                         rec_file, path = self._open_recording(
                             ev.get("filename", ""))
@@ -2466,6 +2821,7 @@ class WebViewerServer:
                         rec_file.close()
                         rec_file = None
                         logger.info(f"Recording saved: {path}")
+                        self._export_recording(path, ws)
                         await ws.send(json.dumps(
                             {"type": "rec_saved", "path": str(path)}))
                     continue
@@ -2539,5 +2895,6 @@ class WebViewerServer:
                 try:
                     rec_file.close()
                     logger.info(f"Recording saved (client gone): {rec_file.name}")
+                    self._export_recording(rec_file.name, ws)
                 except Exception:
                     pass

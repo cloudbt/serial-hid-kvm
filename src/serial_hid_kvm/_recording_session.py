@@ -1,0 +1,93 @@
+"""Resumable, ordered recording uploads independent of viewer connections."""
+import json
+import os
+from pathlib import Path
+import re
+import threading
+
+
+class RecordingSessions:
+    """Persist acknowledged offsets; reconnect/retry must never duplicate bytes.
+
+    One session is one uninterrupted browser MediaRecorder, from manual start
+    to manual finish. Sources and manifests stay out of the final MP4 folder.
+    """
+    MAX_CHUNK = 256 * 1024
+
+    def __init__(self, directory):
+        self.directory = Path(directory).expanduser()
+        self.lock = threading.RLock()
+
+    def _paths(self, session):
+        if not isinstance(session, str) or not re.fullmatch(r"[a-f0-9]{32}", session):
+            raise ValueError("Invalid recording session ID")
+        folder = self.directory / ".recording-sessions" / session
+        return folder / "session.json", folder / "source.webm"
+
+    @staticmethod
+    def _save(path, state):
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8") as file:
+            json.dump(state, file)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+
+    def attach(self, session, filename):
+        with self.lock:
+            manifest, source = self._paths(session)
+            if manifest.exists():
+                state = json.loads(manifest.read_text(encoding="utf-8"))
+                if source.stat().st_size < state["size"]:
+                    raise ValueError("Saved recording is shorter than its acknowledged offset")
+                # Discard a write that wasn't committed to the manifest before
+                # a process crash. The client still has this unacknowledged block.
+                if source.stat().st_size > state["size"]:
+                    with source.open("r+b") as file:
+                        file.truncate(state["size"])
+                return state
+            if not isinstance(filename, str) or not re.fullmatch(r"recording-[A-Za-z0-9._-]+\.webm", filename):
+                raise ValueError("Invalid recording filename")
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            source.touch(exist_ok=False)
+            # Include the session ID to keep distinct tabs with equal clocks
+            # from publishing the same filename.
+            state = {"id":session, "filename":Path(filename).stem + "-" + session[:8] + ".mp4",
+                     "next":0, "size":0, "finished":False}
+            self._save(manifest, state)
+            return state
+
+    def write(self, session, sequence, data):
+        with self.lock:
+            manifest, source = self._paths(session)
+            state = json.loads(manifest.read_text(encoding="utf-8"))
+            if sequence < state["next"]:
+                return state  # ACK was lost; this block is already durable.
+            if state["finished"]:
+                raise ValueError("Recording already finished")
+            if sequence != state["next"]:
+                raise ValueError("Out-of-order recording block")
+            if not data or len(data) > self.MAX_CHUNK:
+                raise ValueError("Invalid recording block size")
+            with source.open("r+b") as file:
+                file.seek(state["size"])
+                file.write(data)
+                file.truncate()
+                file.flush()
+                os.fsync(file.fileno())
+            state["size"] += len(data)
+            state["next"] += 1
+            self._save(manifest, state)
+            return state
+
+    def finish(self, session, expected):
+        with self.lock:
+            manifest, source = self._paths(session)
+            state = json.loads(manifest.read_text(encoding="utf-8"))
+            if expected != state["next"]:
+                raise ValueError("Recording still has unacknowledged data")
+            if not state["size"]:
+                raise ValueError("Recording is empty")
+            state["finished"] = True
+            self._save(manifest, state)
+            return source, self.directory / state["filename"]

@@ -520,6 +520,57 @@ Direct mode is per-browser and not persisted; the viewer always starts in normal
 
 ### Screen Recording
 
+Recording audio is selected independently of speaker playback:
+
+- **Host Mic** (default): the microphone on the computer running this browser.
+- **Target HDMI**: select the matching USB HDMI capture audio input. Click
+  **Inputs** once to allow audio access and reveal device names. If the server
+  has a bound audio device, **Target HDMI (server capture)** is also available.
+  Identical device names include a short ID; do not assume the first belongs to
+  the current Target. Unavailable inputs produce an error, never silent fallback.
+- **No audio**: video only; no microphone is opened.
+
+Use **Check audio** to see the input level without saving a recording. Click it
+again to release the input. Audio is not monitored through Host speakers. Stop
+recording before changing the source or device. The source/device preference is
+remembered separately for each viewer origin (port). Input access is released
+after stopping; a disconnected input stops recording and displays a warning.
+
+One manual **Record → Stop** is one recording session and one final MP4. A
+stable 30 fps recording canvas survives JPEG/WebRTC source changes. Unexpected
+picture/connection loss keeps the last picture with an interruption label while
+local microphone audio continues. Only the picture actually received can be
+recorded; missing Target frames cannot be reconstructed. Server-fed HDMI audio
+also cannot arrive during a server connection loss.
+
+Uploads use numbered blocks of at most 256 KiB with durable acknowledgements.
+Unacknowledged data stays in browser memory and is replayed after authentication
+on reconnect, including server process restarts. Duplicate blocks are ignored.
+The recorder is stopped at 128 MiB awaiting upload to prevent unbounded memory
+growth. If stopped offline, keep the page open on **Waiting to upload…** until
+the server confirms saving. Closing/reloading the page loses buffered data;
+the normal unload warning is therefore retained. No automatic reload happens
+during recording or pending upload. An acknowledged source is retained under
+`.recording-sessions/<session-id>/source.webm`, with its committed offset in
+`session.json`, so it remains available for recovery.
+
+Recording and JPEG preview are capped at 30 fps while recording to reduce CPU
+pressure. WebSocket compression is disabled for already-compressed media;
+heartbeat timeout is 90 seconds and disconnect codes/reasons are logged.
+
+Completed recordings are exported in the background to **H.264/AAC MP4**, using
+FFmpeg/ffprobe from PATH. Frame count, video duration, audio track count and full
+decode are verified before publishing the MP4. WebM originals are always kept.
+The viewer reports export success/failure; a `.conversion.log` beside the original
+also records the result. Existing MP4 files are never overwritten. Disconnects
+do not start exports or split sessions: conversion only begins after manual
+finish and acknowledgement of every block. A forced service kill can interrupt
+an export; the WebM remains available for manual retry. Only one conversion per
+server runs at a time, with two video encoding threads to reduce capture impact.
+
+Microphone access requires browser permission and localhost/HTTPS. Remote
+viewers capture the browser computer's microphone, not the KVM server's mic.
+
 Click the **Record** button in the web viewer toolbar to record the live screen (and audio, if available) to a WebM file. Click it again to stop — a running timer is shown while recording.
 
 Unlike the upstream NanoKVM recorder, **no save dialog appears**: the browser records via `MediaRecorder` and streams the chunks back to the server over the existing WebSocket, and the server writes the file directly to a fixed folder. Set the destination with `--recording-dir`, `SHKVM_RECORDING_DIR`, or `recording_dir` in the config file. The default is the user's `~/Videos` folder (e.g. `C:\Users\<you>\Videos` on Windows).
@@ -528,7 +579,11 @@ Unlike the upstream NanoKVM recorder, **no save dialog appears**: the browser re
 serial-hid-kvm --headless --web --recording-dir "C:\Users\whz\Videos"
 ```
 
-Files are named `recording-<timestamp>.webm`. Recording audio works whether or not speaker playback (the **Unmute** button) is enabled. Because the file is written by the server process, the folder is on the **machine running serial-hid-kvm**, not the browser's machine.
+Final files use fixed JST (UTC+09:00), independent of the browser/Host timezone,
+for example `recording-2026-10-15T14-19-20-163-JST-6a19f76a.mp4`.
+Recording audio works whether or not speaker playback (the **Unmute** button)
+is enabled. Because the file is written by the server process, the folder is on
+the **machine running serial-hid-kvm**, not the browser's machine.
 
 ## API Server
 

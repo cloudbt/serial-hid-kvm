@@ -20,14 +20,41 @@ new vm.Script(input.script);
 const stubs = `
 const sent = [], handlers = {}, btn = {classList:{add(){},remove(){}},
   addEventListener(name, fn){handlers[name]=fn;}};
-const document = {getElementById(){return btn;}};
+const elements={btnRec:btn};
+function element(id){
+  if (!elements[id]) elements[id]={value:id==='recAudioSource'?'mic':'default',
+    options:[],add(o){this.options.push(o);},replaceChildren(){this.options=[];},
+    addEventListener(){}};
+  return elements[id];
+}
+const document = {getElementById:element, createElement(){return {width:0,height:0,getContext(){return {drawImage(){},fillRect(){},fillText(){}};},captureStream(){return canvas.captureStream();}};}};
+const location={host:'127.0.0.1:9330'};
+const localStorage={getItem(){return null;},setItem(){}};
+class Option {constructor(label,value){this.label=label;this.value=value;}}
+let micRequests=0, micClosed=0, denyMic=false;
+const micTrack={readyState:'live',addEventListener(){},stop(){micClosed++;}};
+const navigator={mediaDevices:{
+  async enumerateDevices(){return [];},
+  async getUserMedia(){micRequests++; if(denyMic)throw new Error('permission denied');
+    return {getTracks(){return [micTrack];},getAudioTracks(){return [micTrack];}};}
+}};
+class AudioContext {
+  async resume(){} async close(){}
+  createAnalyser(){return {fftSize:512,getFloatTimeDomainData(){}};}
+  createMediaStreamSource(){return {connect(){}};}
+}
 const window = {MediaRecorder: true, addEventListener(){}};
 const statusEl = {}, container = {focus(){}}, IS_LAN = true;
 const audioCfg = null, recDest = null;
+const crypto = {randomUUID(){return "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";}};
 const WebSocket = {OPEN:1};
 let ws = {readyState:1,send(v){sent.push(v);}};
 let videoMode = false, stoppedTracks = 0;
-const canvas = {captureStream(){return {getVideoTracks(){return [{stop(){stoppedTracks++;}}];}};}};
+let lastCaptured;
+const canvas = {captureStream(){lastCaptured={audio:[{hdmi:true}],
+  getVideoTracks(){return [{stop(){stoppedTracks++;}}];},
+  getAudioTracks(){return this.audio;},removeTrack(t){this.audio=this.audio.filter(x=>x!==t);},
+  addTrack(t){this.audio.push(t);}};return lastCaptured;}};
 function mediaW(){return 1920;} function mediaH(){return 1080;}
 function showHint(){} function wsSend(){}
 function setInterval(){return 1;} function clearInterval(){}
@@ -38,88 +65,100 @@ class MediaRecorder {
 `;
 const checks = `
 (async () => {
-  await startRecording();
-  let release;
-  const first = new Promise(resolve => {release=resolve;});
-  mediaRecorder.ondataavailable({data:{size:1,arrayBuffer:()=>first}});
-  stopRecording();
-  assert.equal(stoppedTracks,0, 'tracks must survive the final dataavailable');
-  mediaRecorder.ondataavailable({data:{size:1,arrayBuffer:async()=>new Uint8Array([2]).buffer}});
-  const finished = mediaRecorder.onstop();
-  await Promise.resolve();
-  assert.equal(sent.length,1, 'rec_stop must wait for Blob reads');
-  await startRecording();
-  assert.equal(sent.length,1, 'a new recording must wait for finalization');
-  release(new Uint8Array([1]).buffer);
-  await finished;
-  assert.equal(new Uint8Array(sent[1])[1],1);
-  assert.equal(new Uint8Array(sent[2])[1],2);
-  assert.equal(JSON.parse(sent[3]).type,'rec_stop');
-  assert.equal(stoppedTracks,1);
-  assert.equal(btn.disabled,false);
-  await startRecording();
-  const oldSocket=ws;
-  oldSocket.readyState=3;
-  ws={readyState:1,send(){throw new Error('old chunks sent to reconnected socket');}};
-  mediaRecorder.ondataavailable({data:{size:1,arrayBuffer:async()=>new Uint8Array([3]).buffer}});
-  stopRecording();
-  await mediaRecorder.onstop();
-  assert(statusEl.textContent.includes('incomplete'));
-  assert.equal(recFinishing,false);
-  ws={readyState:1,send(){}};
-  await startRecording();
-  ws.send=()=>{throw new Error('send failed while closing');};
-  stopRecording();
-  await mediaRecorder.onstop();
-  assert(statusEl.textContent.includes('send failed'));
-  assert.equal(recFinishing,false);
-  assert.equal(btn.disabled,false);
-  // A disconnect during recording arms resume, but a new connection alone
-  // must not record stale canvas contents or an old WebRTC track.
-  ws={readyState:1,send(v){sent.push(v);}};
-  await startRecording();
-  const disconnected=ws;
-  disconnected.readyState=3;
-  recordingConnectionLost();
-  assert.equal(recording,false);
-  assert.equal(recResumePending,true);
-  let releaseTail;
-  mediaRecorder.ondataavailable({data:{size:1,arrayBuffer:()=>new Promise(r=>{releaseTail=r;})}});
-  const stopped=mediaRecorder.onstop();
-  await Promise.resolve();
-  ws={readyState:1,send(v){sent.push(v);}};
-  recordingMediaReady(); // Before authentication/hello: must not resume.
-  await maybeResumeRecording();
-  assert.equal(recording,false);
+  assert.equal(recordingFilename(new Date('2026-10-15T05:19:20.163Z')),
+    'recording-2026-10-15T14-19-20-163-JST.webm');
+  assert.equal(recordingFilename(new Date('2026-12-31T15:00:00.000Z')),
+    'recording-2027-01-01T00-00-00-000-JST.webm');
   recConnectionReady=true;
-  await maybeResumeRecording(); // Still waiting for fresh video.
-  assert.equal(recording,false);
-  recordingMediaReady(); // Fresh video arrived, old session still draining.
-  assert.equal(recording,false);
-  releaseTail(new Uint8Array([9]).buffer);
-  await stopped;
-  await new Promise(setImmediate);
-  assert.equal(recording,true);
-  assert.equal(recResumePending,false);
-  assert.equal(JSON.parse(sent[sent.length-1]).type,'rec_start');
-  assert(statusEl.textContent.includes('new file'));
-  const count=sent.length;
-  recordingMediaReady();
-  await new Promise(setImmediate);
-  assert.equal(sent.length,count, 'video frames must not start duplicate files');
-  // A deliberate stop is never followed by automatic recording.
-  stopRecording();
-  await mediaRecorder.onstop();
-  recordingMediaReady();
-  await maybeResumeRecording();
-  assert.equal(recording,false);
-  // Waiting for reconnect can be cancelled explicitly with the same button.
   await startRecording();
+  const session=recUpload.id;
+  const requests=()=>sent.filter(x=>typeof x==='string').map(x=>JSON.parse(x));
+  assert.equal(requests()[0].type,'rec_session_start');
+  assert.equal(recSourceSelect.value,'mic');
+  assert.deepEqual(lastCaptured.audio,[micTrack]);
+  recordingUploadEvent({type:'rec_session_ready',session,next:0});
+  mediaRecorder.ondataavailable({data:{size:1,arrayBuffer:async()=>new Uint8Array([1]).buffer}});
+  await new Promise(setImmediate);
+  assert.equal(new Uint8Array(sent[sent.length-1])[0],0x11);
+  assert.equal(recUpload.queue.length,1,'data must remain until durable ACK');
+  // The first block reached the server, but the ACK was lost. Audio and the
+  // SAME recorder must keep running across multiple picture disconnects.
   ws.readyState=3;
   recordingConnectionLost();
-  await mediaRecorder.onstop();
-  handlers.click();
-  assert.equal(recResumePending,false);
+  assert.equal(recording,true);
+  assert.equal(micClosed,0);
+  mediaRecorder.ondataavailable({data:{size:1,arrayBuffer:async()=>new Uint8Array([2]).buffer}});
+  await new Promise(setImmediate);
+  assert.equal(recUpload.queue.length,2);
+  ws={readyState:1,send(v){sent.push(v);}};
+  recConnectionReady=true; attachRecordingUpload();
+  assert.equal(recUpload.id,session);
+  recordingUploadEvent({type:'rec_session_ready',session,next:1});
+  assert.equal(recUpload.queue.length,1,'lost ACK must not duplicate block 0');
+  assert.equal(new Uint8Array(sent[sent.length-1])[5],2);
+  // Manual Stop while disconnected must still save the final delayed Blob.
+  ws.readyState=3; recordingConnectionLost();
+  stopRecording();
+  assert.equal(stoppedTracks,0);
+  let releaseTail;
+  mediaRecorder.ondataavailable({data:{size:1,arrayBuffer:()=>new Promise(r=>{releaseTail=r;})}});
+  const finished=mediaRecorder.onstop();
+  await Promise.resolve();
+  await startRecording();
+  assert.equal(recUpload.id,session);
+  releaseTail(new Uint8Array([3]).buffer);
+  await finished;
+  assert.equal(recording,false);
+  assert.equal(recFinishing,true,'saving stays active until server acknowledgement');
+  assert.equal(micClosed,1);
+  ws={readyState:1,send(v){sent.push(v);}};
+  recConnectionReady=true; attachRecordingUpload();
+  recordingUploadEvent({type:'rec_session_ready',session,next:2});
+  assert.equal(new Uint8Array(sent[sent.length-1])[5],3);
+  recordingUploadEvent({type:'rec_ack',session,next:3});
+  assert.equal(requests()[requests().length-1].type,'rec_session_finish');
+  assert.equal(requests().filter(x=>x.type==='rec_session_finish').length,1);
+  recordingUploadEvent({type:'rec_ack',session,next:3}); // Duplicate ACK.
+  assert.equal(requests().filter(x=>x.type==='rec_session_finish').length,1);
+  recordingUploadEvent({type:'rec_session_saved',session,path:'one.mp4'});
+  assert.equal(recFinishing,false);
+  assert.equal(recUpload,null);
+  const count=sent.length;
+  recordingConnectionLost(); recConnectionReady=true; recordingMediaReady();
+  await maybeResumeRecording();
+  assert.equal(sent.length,count,'manual stop must never automatically start another session');
+  // A delayed large Blob is split below the message size limit.
+  await startRecording();
+  mediaRecorder.ondataavailable({data:{size:600000,arrayBuffer:async()=>new Uint8Array(600000).buffer}});
+  await new Promise(setImmediate);
+  assert.equal(recUpload.queue.length,3);
+  assert(recUpload.queue.every(x=>x.data.byteLength<=256*1024));
+  recordingUploadEvent({type:'rec_session_ready',session:recUpload.id,next:0});
+  recordingUploadEvent({type:'rec_ack',session:recUpload.id,next:1});
+  recordingUploadEvent({type:'rec_ack',session:recUpload.id,next:2});
+  recordingUploadEvent({type:'rec_ack',session:recUpload.id,next:3});
+  stopRecording(); await mediaRecorder.onstop();
+  recordingUploadEvent({type:'rec_session_saved',session:recUpload.id,path:'two.mp4'});
+  // No-audio and permission-denied flows still behave explicitly.
+  recSourceSelect.value='none';
+  const beforeMic=micRequests;
+  await startRecording();
+  assert.equal(recording,true);
+  assert.equal(micRequests,beforeMic);
+  assert.equal(lastCaptured.getAudioTracks().length,0);
+  stopRecording(); await mediaRecorder.onstop();
+  recordingUploadEvent({type:'rec_session_ready',session:recUpload.id,next:0});
+  recordingUploadEvent({type:'rec_session_saved',session:recUpload.id,path:'silent.mp4'});
+  recSourceSelect.value='hdmi'; recDeviceSelect.value='';
+  const beforeFailure=sent.length;
+  await startRecording();
+  assert.equal(recording,false);
+  assert.equal(sent.length,beforeFailure);
+  recSourceSelect.value='mic'; recDeviceSelect.value='default'; denyMic=true;
+  await startRecording();
+  assert.equal(recording,false);
+  assert.equal(sent.length,beforeFailure);
+  assert(statusEl.textContent.includes('permission denied'));
 })()
 `;
 vm.runInNewContext(stubs + input.recorder + checks, {assert, Uint8Array, Promise, setImmediate})
