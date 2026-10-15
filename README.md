@@ -454,7 +454,7 @@ Then open `http://localhost:9330` in a browser. To allow access from other machi
 - **Direct** (native) video mode for maximum smoothness when the browser is on the same machine as the capture card
 - Runs alongside the API server and preview window simultaneously
 
-The toolbar is visible whenever you open or reload the viewer, without a startup hint. Press **Ctrl+Alt+Enter** to hide or show it.
+The toolbar is visible whenever you open or reload the viewer, without a startup hint. Press **Ctrl+Alt+Enter** to hide or show it. Keyboard, Display, and Video menus group the related controls; the arrow beside **Record** contains recording audio settings and the ten most recent saved recordings. Connection and capture details expand from the status at the right. Narrow windows use compact controls.
 
 As with the preview window, the mouse cursor is hidden by default. The **Cursor** button in the toolbar shows a local cursor that tracks your mouse instantly, reducing the feeling of input lag caused by video stream latency.
 
@@ -580,6 +580,10 @@ Unlike the upstream NanoKVM recorder, **no save dialog appears**: the browser re
 ```bash
 serial-hid-kvm --headless --web --recording-dir "C:\Users\whz\Videos"
 ```
+
+After stopping, a persistent result card offers **Play** and **Download** as soon as the WebM is saved, then updates to the verified MP4 when conversion completes. If conversion fails, the WebM remains available. The recording menu lists the ten most recent completed recordings across page reloads. Local Windows viewers also get **Open file** (default player) and **Show in folder** (Explorer selection); remote viewers use browser playback/download. File links are signed and expire after 12 hours; refresh the list to renew them. Local OS actions require a loopback connection with a same-origin browser request.
+
+The NanoKVM Target launchers default to `C:\work\TargetPC1\recordings` for Target1 and `C:\work\TargetPC2\recordings` for Target2. An explicit `-RecordingDir` override still takes precedence. Existing recordings stay in their previous location.
 
 Final files use fixed JST (UTC+09:00), independent of the browser/Host timezone,
 for example `recording-2026-10-15T14-19-20-163-JST-6a19f76a.mp4`.

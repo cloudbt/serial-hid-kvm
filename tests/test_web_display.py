@@ -24,7 +24,8 @@ const elements = {
   displayAspect: {value: "source", handlers: {},
     addEventListener(name, callback) { this.handlers[name] = callback; }},
   resolution: {classList: {toggle(name, value) { this[name] = value; }}},
-  btnScale: {}
+  btnScale: {classList: {toggle(name, value) { this[name] = value; }},
+    setAttribute(name, value) { this[name] = value; }}
 };
 const document = {getElementById: id => elements[id]};
 const window = {addEventListener() {}};
@@ -43,6 +44,7 @@ const video = {videoWidth: 1920, videoHeight: 1080, style: {},
                addEventListener() {}, getBoundingClientRect: rect};
 `;
 const checks = `
+assert.equal(scaleMode, "native");
 captureRequest = {width: 1920, height: 1280};
 updateCanvasSize();
 assert.equal(canvas.style.width, "1920px");
@@ -63,6 +65,9 @@ for (const mode of [false, true]) {
 }
 container.clientWidth = 900;
 container.clientHeight = 900;
+updateCanvasSize();
+assert.equal(video.style.width, "1920px");
+scaleMode = "fit";
 updateCanvasSize();
 assert.equal(video.style.width, "900px");
 assert.equal(video.style.height, "600px");

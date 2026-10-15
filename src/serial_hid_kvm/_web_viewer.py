@@ -16,6 +16,7 @@ import importlib.util
 import ipaddress
 import json
 import logging
+import os
 import queue
 import re
 import secrets
@@ -24,6 +25,7 @@ import ssl
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit, quote
 
 import websockets
 from websockets.http11 import Response
@@ -31,6 +33,7 @@ from websockets.http11 import Response
 from ._audio import AudioCapture
 from ._recording import convert_recording
 from ._recording_session import RecordingSessions
+from ._recording_library import RecordingLibrary
 from .hid_protocol import (
     build_keyboard_report,
     build_mouse_abs_packet,
@@ -203,14 +206,14 @@ _VIEWER_HTML = r"""<!DOCTYPE html>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;overflow:hidden;background:#1a1a2e;font-family:system-ui,sans-serif;color:#e0e0e0}
-#toolbar{display:flex;align-items:center;gap:8px;padding:4px 12px;background:#16213e;height:36px;user-select:none}
+#toolbar{display:flex;align-items:center;gap:8px;padding:4px 12px;background:#16213e;height:40px;user-select:none;position:relative;z-index:10;flex-shrink:0}
 #toolbar button{background:#0f3460;border:1px solid #1a1a5e;color:#e0e0e0;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px}
 #toolbar button:hover{background:#1a4a8a}
 #toolbar button:active{background:#0a2a50}
 #toolbar select{background:#0f3460;border:1px solid #1a1a5e;color:#e0e0e0;padding:4px 6px;border-radius:4px;cursor:pointer;font-size:13px}
 #status{margin-left:auto;font-size:12px;color:#8888aa}
 #fps{font-size:12px;color:#8888aa;min-width:70px;text-align:right}
-#container{display:flex;align-items:center;justify-content:center;width:100%;height:calc(100% - 36px);background:#0a0a1a;overflow:auto;cursor:none;outline:none}
+#container{display:flex;align-items:center;justify-content:center;width:100%;height:calc(100% - 40px);background:#0a0a1a;overflow:auto;cursor:none;outline:none}
 #screen,#video{display:block;image-rendering:auto;background:#0a0a1a}
 #video{object-fit:fill}
 #resolution{font-size:12px;white-space:nowrap}
@@ -236,46 +239,121 @@ body.tb-hidden #container{height:100%}
 #login button:hover{background:#1a4a8a}
 #loginErr{color:#e07070;font-size:12px;min-height:14px}
 #login label{font-size:12px;color:#8888aa;display:flex;align-items:center;gap:6px;user-select:none}
+
+[hidden]{display:none!important}
+#toolbar{gap:6px;padding:6px 10px}
+#toolbar button,#toolbar select,.tool-group>summary{font:13px system-ui,sans-serif;height:28px;border-radius:5px;white-space:nowrap}
+#toolbar button{padding:3px 9px;flex-shrink:0}
+#toolbar button:disabled{opacity:.45;cursor:default}
+.tool-group{position:relative;flex-shrink:0}
+.tool-group>summary{display:flex;align-items:center;gap:8px;padding:3px 9px;cursor:pointer;list-style:none;color:#d7deeb}
+.tool-group>summary::-webkit-details-marker{display:none}
+.tool-group>summary:hover,.tool-group[open]>summary{background:#263b5c}
+.tool-group>summary:focus-visible,button:focus-visible,select:focus-visible,a:focus-visible{outline:2px solid #8fb9ff;outline-offset:2px}
+.tool-panel{position:absolute;top:34px;left:0;width:280px;padding:14px;background:#18263b;border:1px solid #384b66;border-radius:9px;box-shadow:0 10px 30px #0008;cursor:default;max-height:calc(100dvh - 64px);overflow:auto}
+.tool-panel h3{font-size:12px;font-weight:600;color:#b7c6dc;margin:0 0 10px}
+.tool-panel h3:not(:first-child){margin-top:18px;border-top:1px solid #384b66;padding-top:12px}
+.tool-panel label{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;margin:10px 0}
+#toolbar .tool-panel select{min-width:0;max-width:190px;width:65%}
+.tool-panel p{font-size:12px;color:#aebcd0;line-height:1.5;margin:8px 0;overflow-wrap:anywhere}
+.panel-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
+.tool-divider{height:18px;width:1px;background:#384b66;flex-shrink:0;margin:0 3px}
+.record-controls{display:flex;align-items:center;gap:1px;flex-shrink:0}
+#btnRec{min-width:100px;font-variant-numeric:tabular-nums}
+.record-controls>button{border-radius:5px 0 0 5px!important}
+#recordMenu>summary{background:#0f3460;border:1px solid #1a1a5e;border-radius:0 5px 5px 0;padding:3px 7px}
+.record-panel{width:360px;left:auto;right:0}
+#recAudioLevel{width:60px;min-width:40px}
+.status-group{margin-left:auto;min-width:0;flex-shrink:1;overflow:visible}
+.status-group>summary{min-width:0;max-width:300px}
+#status{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0}
+#targetName{font-size:12px;color:#bccbe0;white-space:nowrap}
+.status-panel{left:auto;right:0;width:330px;display:flex;flex-direction:column;gap:8px}
+#fps{text-align:left;min-width:0}
+#resolution{white-space:normal;overflow-wrap:anywhere}
+#toolbar button.active{background:#235277;border-color:#5598ce}
+#btnRec.recording{background:#8b2632!important;border-color:#d65c69!important;animation:none}
+#recordingResult{position:fixed;z-index:21;top:50px;right:12px;width:min(380px,calc(100vw - 24px));padding:16px;background:#18263b;border:1px solid #45617d;border-radius:10px;box-shadow:0 10px 30px #0008;font-size:13px}
+body:has(#toolbar details[open]) #recordingResult{display:none}
+#recordingResult strong{display:block;padding-right:20px;color:#a6dfb8}
+#recordingResultName{margin:10px 0 6px;overflow-wrap:anywhere}
+#recordingResult p{font-size:12px;line-height:1.5;color:#b7c6dc;margin-bottom:12px}
+.card-close{position:absolute;right:8px;top:8px;border:0;background:none;color:#bccbe0;font-size:20px;cursor:pointer}
+.file-actions{display:flex;flex-wrap:wrap;gap:6px}
+.file-actions a,.file-actions button{font:12px system-ui,sans-serif;color:#e0e9f7;background:#28466a;border:1px solid #45617d;border-radius:5px;padding:5px 8px;text-decoration:none;cursor:pointer}
+.recent-file{padding:10px 0;border-bottom:1px solid #384b66}
+.recent-file strong{display:block;font-size:12px;overflow-wrap:anywhere;margin-bottom:5px}
+.recent-file small{display:block;color:#aebcd0;margin-bottom:8px}
+body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
+@media(max-width:850px){#targetName{display:none}.status-group>summary{max-width:160px}.record-panel{position:fixed;left:auto;right:8px;top:46px}}
+@media(max-width:600px){#toolbar{padding:6px;gap:3px}.status-group{display:none}.tool-divider{margin:0 1px}.tool-group>summary[data-compact]{font-size:0;padding:3px 7px}.tool-group>summary[data-compact]::after{content:attr(data-compact);font-size:16px}#toolbar #btnFs{font-size:0;padding:3px 8px}#btnFs::after{content:"⛶";font-size:17px}#toolbar #btnAudio{font-size:0;padding:3px 7px}#btnAudio::after{content:"♫";font-size:16px}.tool-panel,.record-panel{position:fixed;top:46px;left:8px;right:8px;width:auto;max-width:400px}}
 </style>
 </head>
 <body>
 <div id="toolbar">
-  <button id="btnCad" title="Send Ctrl+Alt+Delete to target">Ctrl+Alt+Del</button>
-  <button id="btnAltTab" title="Send Alt+Tab to target">Alt+Tab</button>
-  <!-- <button id="btnIme" title="Toggle target IME (sends &#x534a;&#x89d2;/&#x5168;&#x89d2;) — bypasses host IME">IME &#x3042;/A</button> -->
-  <!-- <button id="btnCaps" title="Toggle Caps Lock (sends Shift+CapsLock for JIS keyboards)">Caps</button> -->
-  <!-- <button id="btnViewOnly" title="Toggle view-only mode (no input sent)">View Only</button> -->
-  <button id="btnAudio" title="Toggle audio playback" style="display:none">&#x1f507; Audio</button>
-  <button id="btnRec" title="Record screen + audio to the server's recording folder">&#x23fa; Record</button>
-  <select id="recAudioSource" aria-label="Recording audio source" title="Stop recording before changing audio source">
-    <option value="mic">Host Mic</option><option value="hdmi">Target HDMI</option><option value="none">No audio</option>
-  </select>
-  <select id="recAudioDevice" aria-label="Recording audio device" title="Select the input on the computer running this browser" style="max-width:190px"></select>
-  <button id="btnRecInputs" title="Allow audio access and refresh input device names">Inputs</button>
-  <button id="btnRecCheck" title="Check selected audio input without saving a recording">Check audio</button>
-  <meter id="recAudioLevel" aria-label="Recording input level" min="0" max="1" value="0" style="width:65px"></meter>
-  <span id="recAudioStatus" style="font-size:12px" role="status"></span>
-  <button id="btnCursor" title="Toggle local cursor visibility">Cursor</button>
-  <button id="btnScale" title="Toggle 1:1 / Fit scaling">Fit</button>
-  <select id="displayAspect" aria-label="Display aspect ratio" title="Display proportion correction; does not change capture resolution">
-    <option value="source">Source ratio</option>
-    <option value="3:2">Correct to 3:2</option>
-  </select>
-  <button id="btnRtc" title="Low-latency H.264 video over WebRTC (server keeps the capture device, so OCR/MCP stay available)">H264</button>
-  <select id="rtcQuality" title="H264 quality preset — Auto picks 16M/60 on LAN and 4M/30 for remote viewers">
-    <option value="auto">Auto</option>
-    <option value="16000000/60">16M/60</option>
-    <option value="8000000/30">8M/30</option>
-    <option value="4000000/30">4M/30</option>
-    <option value="2000000/30">2M/30</option>
-  </select>
-  <button id="btnDirect" title="Direct GPU video straight from the capture card (smoothest; uses this PC's device)">Direct</button>
   <button id="btnFs" title="Toggle fullscreen">Fullscreen</button>
-  <span id="status">Connecting…</span>
-  <span id="targetName"></span>
-  <span id="fps"></span>
-  <span id="resolution"></span>
+  <button id="btnScale" aria-pressed="false" title="Toggle 1:1 / Fit scaling">1:1</button>
+  <details class="tool-group" id="keyboardMenu">
+    <summary title="Keyboard shortcuts" data-compact="⌨">Keyboard</summary>
+    <div class="tool-panel"><h3>Send to target</h3>
+      <button id="btnCad" title="Send Ctrl+Alt+Delete to target">Ctrl+Alt+Del</button>
+      <button id="btnAltTab" title="Send Alt+Tab to target">Alt+Tab</button>
+    </div>
+  </details>
+  <details class="tool-group">
+    <summary title="Display settings" data-compact="▣">Display</summary>
+    <div class="tool-panel"><h3>Display</h3>
+      <div class="panel-row"><button id="btnCursor" title="Toggle local cursor visibility">Cursor</button>
+      </div>
+      <label>Proportions <select id="displayAspect" aria-label="Display aspect ratio" title="Display proportion correction; does not change capture resolution">
+        <option value="source">Source ratio</option><option value="3:2">Correct to 3:2</option>
+      </select></label>
+    </div>
+  </details>
+  <details class="tool-group">
+    <summary title="Video mode and quality" data-compact="▶">Video</summary>
+    <div class="tool-panel"><h3>Video mode</h3>
+      <p>Default: JPEG stream. Toggle a mode off to return.</p>
+      <div class="panel-row"><button id="btnRtc" title="H264 streaming; capture stays available to OCR/MCP">H264</button>
+      <button id="btnDirect" title="Browser opens the local capture card directly">Direct</button></div>
+      <label>H264 quality <select id="rtcQuality" aria-label="H264 quality">
+        <option value="auto">Auto</option><option value="16000000/60">16M/60</option>
+        <option value="8000000/30">8M/30</option><option value="4000000/30">4M/30</option><option value="2000000/30">2M/30</option>
+      </select></label>
+    </div>
+  </details>
+  <span class="tool-divider"></span>
+  <button id="btnAudio" title="Toggle audio playback" style="display:none">&#x1f507; Audio</button>
+  <div class="record-controls">
+    <button id="btnRec" title="Start or stop recording">&#x23fa; Record</button>
+    <details class="tool-group" id="recordMenu">
+      <summary title="Recording settings and recent files" aria-label="Recording settings and recent files">▾</summary>
+      <div class="tool-panel record-panel"><h3>Recording audio</h3>
+        <label>Source <select id="recAudioSource" aria-label="Recording audio source" title="Stop recording before changing audio source">
+          <option value="mic">Host Mic</option><option value="hdmi">Target HDMI</option><option value="none">No audio</option>
+        </select></label>
+        <label>Device <select id="recAudioDevice" aria-label="Recording audio device"></select></label>
+        <div class="panel-row"><button id="btnRecInputs" title="Allow audio access and refresh devices">Inputs</button>
+        <button id="btnRecCheck" title="Check audio without recording">Check audio</button>
+        <meter id="recAudioLevel" aria-label="Recording input level" min="0" max="1" value="0"></meter></div>
+        <p id="recAudioStatus" role="status"></p>
+        <h3>Recent recordings <button id="refreshRecordings" title="Refresh recent recordings">↻</button></h3>
+        <div id="recentRecordings" aria-live="polite">Connect to view recordings.</div>
+        <p id="recordingActionStatus" role="status"></p>
+      </div>
+    </details>
+  </div>
+  <details class="tool-group status-group">
+    <summary title="Connection and capture details"><span id="status">Connecting…</span><span id="targetName"></span></summary>
+    <div class="tool-panel status-panel"><h3>Stream details</h3><span id="fps"></span><span id="resolution"></span></div>
+  </details>
 </div>
+<aside id="recordingResult" hidden aria-label="Recording saved" aria-live="polite">
+  <button id="closeRecordingResult" class="card-close" aria-label="Close recording result">×</button>
+  <strong id="recordingResultTitle">Recording saved</strong>
+  <div id="recordingResultName"></div><p id="recordingResultState"></p>
+  <div id="recordingResultActions" class="file-actions"></div>
+</aside>
 <div id="container" tabindex="0"><canvas id="screen"></canvas><video id="video" playsinline muted style="display:none"></video></div>
 <div id="hint"></div>
 <div id="login"><form id="loginForm">
@@ -453,6 +531,7 @@ function connect() {
         else if (msg.type === "auth_failed") { onAuthFailed(msg); }
         else if (msg.type === "hello") {
           recConnectionReady = true;
+          refreshRecordingLibrary();
           attachRecordingUpload();
           checkBuild(msg.build);
           if (msg.target_name) {
@@ -517,15 +596,21 @@ function connect() {
         else if (["rec_session_ready", "rec_ack", "rec_session_saved", "rec_session_error"].includes(msg.type)) {
           recordingUploadEvent(msg);
         }
+        else if (msg.type === "recordings_list") { renderRecordingLibrary(msg); }
+        else if (msg.type === "recordings_action") {
+          document.getElementById("recordingActionStatus").textContent = msg.error || msg.message;
+          if (msg.error) showHint(msg.error);
+        }
         else if (msg.type === "rec_saved") {
-          statusEl.textContent = "WebM saved; MP4 queued: " + msg.path;
-          showHint(statusEl.textContent);
+          recordingFileSaved(msg);
+          statusEl.textContent = "Recording saved · MP4 processing";
         }
         else if (msg.type === "rec_exported") {
-          statusEl.textContent = "MP4 verified: " + msg.path;
-          showHint(statusEl.textContent);
+          recordingFileUpdated(msg);
+          statusEl.textContent = "MP4 ready";
         }
         else if (msg.type === "rec_export_error") {
+          recordingFileUpdated(msg);
           statusEl.textContent = "MP4 failed; WebM kept: " + msg.error;
           showHint(statusEl.textContent);
         }
@@ -580,7 +665,7 @@ async function renderLoop() {
 }
 
 // --- Display sizing (works for both the canvas and the direct <video>) ---
-let scaleMode = "fit";  // "native" = 1:1 pixel, "fit" = fit to window (default)
+let scaleMode = "native";  // "native" = 1:1 pixel (default), "fit" = fit to window
 let captureRequest = null;
 let captureStatus = null;
 let aspectManuallySelected = false;
@@ -642,9 +727,11 @@ function updateCanvasSize() {
   const el = activeEl();
   const mw = mediaW(), mh = mediaH();
   updateResolutionStatus();
+  const btn = document.getElementById("btnScale");
+  btn.classList.toggle("active", scaleMode === "fit");
+  btn.setAttribute("aria-pressed", String(scaleMode === "fit"));
   if (!mw || !mh) return;
   const ar = displayAspect.value === "3:2" ? 3 / 2 : mw / mh;
-  const btn = document.getElementById("btnScale");
   btn.textContent = scaleMode === "fit" ? "Fit" :
     (displayAspect.value === "source" ? "1:1" : "Width 1:1");
   if (scaleMode === "fit") {
@@ -849,7 +936,7 @@ let _tbTimer = null;
 function _tbShow() { toolbar.classList.add("visible"); clearTimeout(_tbTimer); }
 function _tbScheduleHide() {
   clearTimeout(_tbTimer);
-  _tbTimer = setTimeout(() => toolbar.classList.remove("visible"), 1500);
+  _tbTimer = setTimeout(() => (toolbar.querySelector("details[open]") ? _tbScheduleHide() : toolbar.classList.remove("visible")), 1500);
 }
 document.addEventListener("mousemove", (e) => {
   if (!document.body.classList.contains("fs-autohide")) return;
@@ -866,7 +953,7 @@ toolbar.addEventListener("mouseleave", () => { if (document.body.classList.conta
 let _tbDragging = false, _tbDragX0 = 0, _tbDragL0 = 0;
 toolbar.addEventListener("mousedown", (e) => {
   if (!document.body.classList.contains("fs-autohide")) return;
-  if (e.target.tagName === "BUTTON") return;
+  if (e.target !== toolbar) return;
   _tbDragging = true;
   _tbDragX0 = e.clientX;
   _tbDragL0 = _tbLeft;
@@ -1007,6 +1094,81 @@ document.getElementById("btnAudio").addEventListener("click", async () => {
   container.focus();
 });
 
+// --- Toolbar panels and recording library ---
+let recentRecordingItems = [];
+let resultRecordingId = null;
+let resultRecordingPending = false;
+let localRecordingActions = false;
+let recordingLibraryTimer = null;
+function refreshRecordingLibrary() { wsSend({type:"recordings_list"}); }
+function closeToolbarPanels() {
+  toolbar.querySelectorAll("details[open]").forEach(d => d.open = false);
+}
+toolbar.querySelectorAll("details").forEach(detail => {
+  detail.addEventListener("toggle", () => {
+    if (!detail.open) return;
+    toolbar.querySelectorAll("details[open]").forEach(other => { if (other !== detail) other.open = false; });
+    if (detail.id === "recordMenu") refreshRecordingLibrary();
+    if (document.fullscreenElement) _tbShow();
+  });
+});
+document.addEventListener("pointerdown", e => { if (!toolbar.contains(e.target)) closeToolbarPanels(); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && toolbar.querySelector("details[open]")) {
+    e.preventDefault(); e.stopPropagation(); closeToolbarPanels(); container.focus();
+  }
+}, true);
+document.getElementById("refreshRecordings").addEventListener("click", refreshRecordingLibrary);
+document.getElementById("closeRecordingResult").addEventListener("click", () => {
+  document.getElementById("recordingResult").hidden = true;
+  resultRecordingId = null; resultRecordingPending = false;
+});
+function recordingFileActions(item) {
+  const actions = document.createElement("div"); actions.className = "file-actions";
+  const play = document.createElement("a"); play.textContent = "Play";
+    play.href = item.url; play.target = "_blank"; play.rel = "noopener noreferrer"; actions.append(play);
+  const download = document.createElement("a"); download.textContent = "Download";
+  download.href = item.url + "&download=1"; download.download = item.name; actions.append(download);
+  if (localRecordingActions) for (const [action, label] of [["open","Open file"],["reveal","Show in folder"]]) {
+    const button = document.createElement("button"); button.textContent = label;
+    button.addEventListener("click", () => wsSend({type:"recordings_open", id:item.id, action}));
+    actions.append(button);
+  }
+  return actions;
+}
+function renderRecordingLibrary(msg) {
+  recentRecordingItems = msg.items; localRecordingActions = !!msg.local;
+  clearTimeout(recordingLibraryTimer);
+  if (msg.items.some(item => item.state.includes("processing")))
+    recordingLibraryTimer = setTimeout(refreshRecordingLibrary, 3000);
+  const list = document.getElementById("recentRecordings"); list.replaceChildren();
+  if (!msg.items.length) list.textContent = "No saved recordings yet.";
+  for (const item of msg.items) {
+    const row = document.createElement("div"); row.className = "recent-file";
+    const name = document.createElement("strong"); name.textContent = item.name; row.append(name);
+    const info = document.createElement("small");
+    info.textContent = new Date(item.modified * 1000).toLocaleString() + " · " + (item.size/1048576).toFixed(1) + " MB · " + item.state;
+    row.append(info, recordingFileActions(item)); list.append(row);
+  }
+  const item = msg.items.find(item => item.id === resultRecordingId);
+  if (item) {
+    const card = document.getElementById("recordingResult");
+    const actions = document.getElementById("recordingResultActions");
+    document.getElementById("recordingResultName").textContent = item.name;
+    document.getElementById("recordingResultState").textContent = item.state;
+    actions.replaceChildren(recordingFileActions(item));
+    if (resultRecordingPending) { card.hidden = false; resultRecordingPending = false; }
+  }
+}
+function recordingFileSaved(msg) {
+  closeToolbarPanels();
+  // Only completion of a recording brings up the card; background updates do not reopen a dismissed card.
+  resultRecordingId = msg.recording_id || resultRecordingId;
+  resultRecordingPending = true;
+  refreshRecordingLibrary();
+}
+function recordingFileUpdated(msg) { refreshRecordingLibrary(); }
+
 // --- Screen recording ---
 // Records the live canvas (video) plus streamed audio via MediaRecorder, and
 // streams the resulting WebM chunks back to the server over the WebSocket.
@@ -1071,8 +1233,8 @@ function recordingUploadEvent(msg) {
     btn.disabled = false;
     btn.classList.remove("recording");
     btn.textContent = "⏺ Record";
-    statusEl.textContent = "Recording saved; one MP4 queued: " + msg.path;
-    showHint(statusEl.textContent);
+    recordingFileSaved(msg);
+    statusEl.textContent = "Recording saved · MP4 processing";
     return;
   }
   if (msg.type === "rec_session_ready" || msg.type === "rec_ack") {
@@ -1307,6 +1469,9 @@ async function startRecordingSession() {
   }
   // Video from the active display (canvas in stream mode, <video> in direct).
   const startSocket = ws;
+  document.getElementById("recordingResult").hidden = true;
+  resultRecordingId = null;
+  resultRecordingPending = false;
   closeRecordingPreview();
   lockRecordingAudio(true);
   document.getElementById("btnRec").disabled = true;
@@ -1400,7 +1565,7 @@ async function startRecordingSession() {
     const s = Math.floor((Date.now() - recStartTime) / 1000);
     const mm = String(Math.floor(s / 60)).padStart(2, "0");
     const ss = String(s % 60).padStart(2, "0");
-    btn.textContent = "⏹ " + mm + ":" + ss;
+    btn.textContent = "■ Stop " + mm + ":" + ss;
   };
   tick();
   recTimer = setInterval(tick, 500);
@@ -1482,6 +1647,7 @@ function toggleToolbar() {
   toolbarHidden = !toolbarHidden;
   document.body.classList.toggle("tb-hidden", toolbarHidden);
   if (toolbarHidden) {
+    toolbar.querySelectorAll("details[open]").forEach(d => d.open = false);
     toolbar.classList.remove("visible");
     showHint("Ctrl+Alt+Enter: toolbar");
   } else {
@@ -1841,6 +2007,7 @@ class WebViewerServer:
         self._recording_jobs: set = set()
         self._conversion_lock = asyncio.Lock()
         self._recording_sessions = RecordingSessions(config.recording_dir)
+        self._recording_library = RecordingLibrary(config.recording_dir)
         self._session_exports: dict = {}
         # Number of clients currently consuming the server JPEG stream.  The
         # capture device is only held while this is > 0, so a client switching
@@ -1953,6 +2120,9 @@ class WebViewerServer:
 
     async def _process_http(self, connection, request):
         """Serve the HTML viewer and PWA assets for HTTP requests."""
+        if urlsplit(request.path).path == "/recordings/file":
+            return await self._serve_recording(connection, request)
+
         if request.path == "/ws":
             # Stash User-Agent for logging when _handle_client runs
             ua = request.headers.get("User-Agent", "")
@@ -1982,6 +2152,59 @@ class WebViewerServer:
             }),
             html_bytes,
         )
+
+    async def _serve_recording(self, connection, request):
+        """Signed links are issued only over an authenticated viewer socket."""
+        try:
+            query = parse_qs(urlsplit(request.path).query)
+            path = self._recording_library.resolve_link(query)
+            size = path.stat().st_size
+            headers = {"Content-Type": "video/mp4" if path.suffix == ".mp4" else "video/webm",
+                       "Accept-Ranges": "bytes", "Cache-Control": "private, no-store",
+                       "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
+            disposition = "attachment" if query.get("download") == ["1"] else "inline"
+            headers["Content-Disposition"] = f"{disposition}; filename*=UTF-8''{quote(path.name)}"
+            start, end, status, reason = 0, size - 1, 200, "OK"
+            byte_range = request.headers.get("Range")
+            if byte_range:
+                match = re.fullmatch(r"bytes=(\d*)-(\d*)", byte_range)
+                if not match or not any(match.groups()):
+                    raise IndexError("Invalid byte range")
+                first, last = match.groups()
+                if first:
+                    start = int(first)
+                    end = min(int(last), end) if last else end
+                else:
+                    start = max(0, size - int(last))
+                if start > end or start >= size:
+                    raise IndexError("Byte range is outside the recording")
+                # Bound individual playback range reads on long recordings.
+                end = min(end, start + 4 * 1024 * 1024 - 1)
+                headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+                status, reason = 206, "Partial Content"
+            def read():
+                with path.open("rb") as file:
+                    file.seek(start)
+                    return file.read(end - start + 1)
+            body = await asyncio.to_thread(read)
+            headers["Content-Length"] = str(len(body))
+            return Response(status, reason, websockets.Headers(headers), body)
+        except IndexError:
+            return Response(416, "Range Not Satisfiable", websockets.Headers({"Content-Range": f"bytes */{size}"}), b"")
+        except (OSError, ValueError):
+            return Response(404, "Not Found", websockets.Headers({"Content-Type":"text/plain", "Cache-Control":"no-store"}), b"Recording unavailable; refresh the recordings list.")
+
+    @staticmethod
+    def _local_recording_client(ws):
+        """OS actions require a loopback peer AND a same-origin browser request."""
+        try:
+            if not ws.remote_address or not ipaddress.ip_address(ws.remote_address[0]).is_loopback:
+                return False
+            origin = urlsplit(ws.request.headers.get("Origin", ""))
+            host = ws.request.headers.get("Host", "")
+            return os.name == "nt" and origin.scheme in ("http", "https") and origin.netloc == host
+        except (ValueError, AttributeError):
+            return False
 
     def _client_is_wan(self, ip: str) -> bool:
         """Whether this client connects across the public internet.
@@ -2733,6 +2956,23 @@ class WebViewerServer:
 
                 ev_type = ev.get("type")
 
+                if ev_type == "recordings_list":
+                    items = await asyncio.to_thread(self._recording_library.items)
+                    await ws.send(json.dumps({"type":"recordings_list", "items":items,
+                                              "local":self._local_recording_client(ws)}))
+                    continue
+
+                if ev_type == "recordings_open":
+                    try:
+                        if not self._local_recording_client(ws):
+                            raise ValueError("Open file/folder is available only from this computer")
+                        await asyncio.to_thread(self._recording_library.open_local, ev.get("id"), ev.get("action"))
+                        result = {"type":"recordings_action", "message":"Opened on this computer"}
+                    except (OSError, ValueError) as exc:
+                        result = {"type":"recordings_action", "error":str(exc)}
+                    await ws.send(json.dumps(result))
+                    continue
+
                 if ev_type == "rec_session_start":
                     try:
                         result = await asyncio.to_thread(self._recording_sessions.attach,
@@ -2754,9 +2994,9 @@ class WebViewerServer:
                                                                      upload_session, ev.get("next"))
                         state["recording_session"] = False
                         await ws.send(json.dumps({"type":"rec_session_saved", "session":upload_session,
-                                                  "path":str(destination)}))
+                                                  "path":str(destination), "recording_id":self._recording_library.identifier(destination.name)}))
                         if destination.exists():
-                            await ws.send(json.dumps({"type":"rec_exported", "session":upload_session, "path":str(destination)}))
+                            await ws.send(json.dumps({"type":"rec_exported", "session":upload_session, "path":str(destination), "recording_id":self._recording_library.identifier(destination.name)}))
                         elif upload_session not in self._session_exports or self._session_exports[upload_session].done():
                             self._session_exports[upload_session] = self._export_recording(source, ws, destination, upload_session)
                         logger.info("Recording session finished: %s -> %s", upload_session, destination)
@@ -2821,7 +3061,7 @@ class WebViewerServer:
                         logger.info(f"Recording saved: {path}")
                         self._export_recording(path, ws)
                         await ws.send(json.dumps(
-                            {"type": "rec_saved", "path": str(path)}))
+                            {"type": "rec_saved", "path": str(path), "recording_id":self._recording_library.identifier(Path(path).stem + ".mp4")}))
                     continue
 
                 elif ev_type == "keydown":

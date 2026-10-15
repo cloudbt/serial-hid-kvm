@@ -45,6 +45,9 @@ class AudioContext {
 }
 const window = {MediaRecorder: true, addEventListener(){}};
 const statusEl = {}, container = {focus(){}}, IS_LAN = true;
+let resultRecordingId = null, resultRecordingPending = false;
+const savedFiles = [];
+function recordingFileSaved(msg) { savedFiles.push(msg.path); }
 const audioCfg = null, recDest = null;
 const crypto = {randomUUID(){return "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";}};
 const WebSocket = {OPEN:1};
@@ -139,6 +142,7 @@ const checks = `
   recordingUploadEvent({type:'rec_ack',session:recUpload.id,next:3});
   stopRecording(); await mediaRecorder.onstop();
   recordingUploadEvent({type:'rec_session_saved',session:recUpload.id,path:'two.mp4'});
+  assert.equal(savedFiles.length,2,'both completions must update saved-file UI');
   // No-audio and permission-denied flows still behave explicitly.
   recSourceSelect.value='none';
   const beforeMic=micRequests;
