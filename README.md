@@ -531,12 +531,39 @@ Recording audio is selected independently of speaker playback:
   Identical device names include a short ID; do not assume the first belongs to
   the current Target. Unavailable inputs produce an error, never silent fallback.
 - **No audio**: video only; no microphone is opened.
+- **Host Mic + Target HDMI**: mix both selected devices into one stereo audio
+  track. Each has its own 0–200% recording volume and mute control (100% initial
+  volume). The two inputs must be different devices. Browser capture uses the
+  exact selected IDs and disables automatic gain, echo cancellation and noise
+  suppression. The mixer includes compression to reduce overload on summing.
 
-Use **Check audio** to see the input level without saving a recording. Click it
-again to release the input. Audio is not monitored through Host speakers. Stop
-recording before changing the source or device. The source/device preference is
-remembered separately for each viewer origin (port). Input access is released
-after stopping; a disconnected input stops recording and displays a warning.
+Use **Check audio** to see both input levels without saving a recording. Click
+it again to release the inputs. Optional **Listen to HDMI on Host headphones**
+works during checking or recording through the Host's default playback device;
+set that device to EarPods in Windows. Its volume is independent of recording
+volume/mute. The microphone is never sent to playback. Monitoring starts off on
+page load. Legacy HDMI playback is suppressed while the mixer owns HDMI, so it
+cannot be heard twice. Stop recording before changing mode or input devices;
+volume, mute and monitoring can be changed during recording. Mode, devices and
+volumes are remembered separately for each viewer origin (port), including old
+single-device preferences. Access is released when checking/recording stops.
+
+Device selectors offer an automatically selected **Default** option: **EarPods**
+for Host Mic, **Target1 HDMI** (the card ending `057AF2` at port 9330) for Target1,
+and **Target2 HDMI** (ending `D0C23B` at port 9330) for Target2. Browser device IDs
+vary by origin; the distinct Windows USB3 Digital Audio device names identify
+these same cards at the other port. Friendly Target1/Target2 names replace the
+ambiguous interface labels. Missing or ambiguous defaults require a manual
+choice rather than falling back to another card. Existing profiles migrate once
+to these default choices and 100% recording volumes; later overrides persist.
+
+An input disconnected during recording displays a warning while the other input
+continues. The mixer keeps the same output track alive with silence for a missing
+input and retries that exact device; recovery does not stop MediaRecorder or
+create another file. A default microphone is pinned to its resolved device for
+recovery. A missing device at initial startup is an error and does not start a
+partial recording. Saved-but-missing devices stay selected rather than silently
+falling back. Audio not received during an interruption cannot be recovered.
 
 One manual **Record → Stop** is one recording session and one final MP4. A
 stable 30 fps recording canvas survives JPEG/WebRTC source changes. Unexpected

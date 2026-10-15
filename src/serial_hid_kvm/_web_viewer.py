@@ -31,6 +31,8 @@ import websockets
 from websockets.http11 import Response
 
 from ._audio import AudioCapture
+from ._web_audio import RECORDING_AUDIO_MIXER_JS
+from ._web_recording_audio import RECORDING_AUDIO_CONTROLS_JS
 from ._recording import convert_recording
 from ._recording_session import RecordingSessions
 from ._recording_library import RecordingLibrary
@@ -262,8 +264,18 @@ body.tb-hidden #container{height:100%}
 #btnRec{min-width:100px;font-variant-numeric:tabular-nums}
 .record-controls>button{border-radius:5px 0 0 5px!important}
 #recordMenu>summary{background:#0f3460;border:1px solid #1a1a5e;border-radius:0 5px 5px 0;padding:3px 7px}
-.record-panel{width:360px;left:auto;right:0}
-#recAudioLevel{width:60px;min-width:40px}
+.record-panel{width:min(420px,calc(100vw - 24px));left:auto;right:0}
+.rec-channel{border-top:1px solid #384b66;padding-top:10px;margin-top:12px}
+.rec-channel[hidden],#recMonitorControls[hidden]{display:none}
+.rec-channel-title{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px}
+.rec-channel-state{color:#aebcd0;font-size:11px;overflow-wrap:anywhere}
+.rec-channel-state.interrupted{color:#ffb48c}
+.record-panel input[type=range]{width:100%;accent-color:#80b7ff}
+.record-panel input[type=checkbox]{accent-color:#80b7ff}
+.record-panel .rec-mute{display:flex;gap:5px;margin:0;white-space:nowrap}
+.rec-level{display:flex;align-items:center;gap:10px;color:#aebcd0;font-size:11px}
+.rec-level meter{flex:1;min-width:40px;height:12px}
+.record-panel .rec-check{justify-content:flex-start;gap:8px}
 .status-group{margin-left:auto;min-width:0;flex-shrink:1;overflow:visible}
 .status-group>summary{min-width:0;max-width:300px}
 #status{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0}
@@ -330,12 +342,28 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
       <summary title="Recording settings and recent files" aria-label="Recording settings and recent files">▾</summary>
       <div class="tool-panel record-panel"><h3>Recording audio</h3>
         <label>Source <select id="recAudioSource" aria-label="Recording audio source" title="Stop recording before changing audio source">
-          <option value="mic">Host Mic</option><option value="hdmi">Target HDMI</option><option value="none">No audio</option>
+          <option value="mic">Host Mic</option><option value="hdmi">Target HDMI</option><option value="mix">Host Mic + Target HDMI</option><option value="none">No audio</option>
         </select></label>
-        <label>Device <select id="recAudioDevice" aria-label="Recording audio device"></select></label>
+        <section class="rec-channel" id="recMicChannel" aria-label="Host Mic recording input">
+          <div class="rec-channel-title"><strong>Host Mic · My voice</strong><span id="recMicState" class="rec-channel-state">Not checked</span></div>
+          <label>Device <select id="recAudioDevice" aria-label="Host microphone device"></select></label>
+          <div class="rec-channel-title"><label for="recMicGain">Record volume <output id="recMicGainValue">100%</output></label><label class="rec-mute"><input id="recMicMute" type="checkbox">Mute</label></div>
+          <input id="recMicGain" type="range" min="0" max="200" value="100" aria-label="Host Mic recording volume">
+          <div class="rec-level">Input level <meter id="recAudioLevel" aria-label="Host Mic input level" min="0" max="1" value="0"></meter></div>
+        </section>
+        <section class="rec-channel" id="recHdmiChannel" aria-label="Target HDMI recording input" hidden>
+          <div class="rec-channel-title"><strong>Target HDMI · Meeting audio</strong><span id="recHdmiState" class="rec-channel-state">Not checked</span></div>
+          <label>Device <select id="recHdmiDevice" aria-label="Target HDMI audio device"></select></label>
+          <div class="rec-channel-title"><label for="recHdmiGain">Record volume <output id="recHdmiGainValue">100%</output></label><label class="rec-mute"><input id="recHdmiMute" type="checkbox">Mute</label></div>
+          <input id="recHdmiGain" type="range" min="0" max="200" value="100" aria-label="Target HDMI recording volume">
+          <div class="rec-level">Input level <meter id="recHdmiLevel" aria-label="Target HDMI input level" min="0" max="1" value="0"></meter></div>
+          <label class="rec-check"><input id="recMonitor" type="checkbox">Listen to HDMI on Host headphones</label>
+          <div id="recMonitorControls" hidden><label for="recMonitorGain">Listen volume <output id="recMonitorGainValue">50%</output></label>
+          <input id="recMonitorGain" type="range" min="0" max="100" value="50" aria-label="HDMI headphone monitoring volume">
+          <p>Uses Host default playback device. Select EarPods in Windows. Active during audio check or recording; does not change recorded volume.</p></div>
+        </section>
         <div class="panel-row"><button id="btnRecInputs" title="Allow audio access and refresh devices">Inputs</button>
-        <button id="btnRecCheck" title="Check audio without recording">Check audio</button>
-        <meter id="recAudioLevel" aria-label="Recording input level" min="0" max="1" value="0"></meter></div>
+        <button id="btnRecCheck" title="Check audio without recording">Check audio</button></div>
         <p id="recAudioStatus" role="status"></p>
         <h3>Recent recordings <button id="refreshRecordings" title="Refresh recent recordings">↻</button></h3>
         <div id="recentRecordings" aria-live="polite">Connect to view recordings.</div>
@@ -537,6 +565,7 @@ function connect() {
           if (msg.target_name) {
             document.title = msg.target_name + " · NanoKVM";
             document.getElementById("targetName").textContent = msg.target_name;
+            setRecordingAudioTarget(msg.target_name);
           }
           if (msg.direct === false) {
             const directBtn = document.getElementById("btnDirect");
@@ -1044,6 +1073,7 @@ async function enableAudioPlayback() {
   }
   audioOn = true;
   if (playGain) playGain.gain.value = 1;
+  syncLegacyAudioPlayback();
   const btn = document.getElementById("btnAudio");
   btn.textContent = "\u{1f50a} Audio";
   btn.classList.add("active");
@@ -1086,7 +1116,7 @@ document.getElementById("btnAudio").addEventListener("click", async () => {
   // (LAN keeps the always-on feed, mute is just a local gain).
   if (!IS_LAN) {
     if (audioOn) wsSend({type: "audio", on: true});
-    else if (!recording || document.getElementById("recAudioSource").value !== "hdmi")
+    else if (!(recAudioSession?.hasHdmi || recAudioPreview?.hasHdmi))
       wsSend({type: "audio", on: false});
   }
   btn.textContent = (audioOn ? "\u{1f50a}" : "\u{1f507}") + " Audio";
@@ -1168,6 +1198,8 @@ function recordingFileSaved(msg) {
   refreshRecordingLibrary();
 }
 function recordingFileUpdated(msg) { refreshRecordingLibrary(); }
+
+__RECORDING_AUDIO_MIXER__
 
 // --- Screen recording ---
 // Records the live canvas (video) plus streamed audio via MediaRecorder, and
@@ -1255,138 +1287,13 @@ function recordingUploadEvent(msg) {
   }
 }
 
-const recSourceSelect = document.getElementById("recAudioSource");
-const recDeviceSelect = document.getElementById("recAudioDevice");
-const recAudioStatus = document.getElementById("recAudioStatus");
-function recAudioKey() { return "recording-audio:" + location.host; }
-function rememberRecordingAudio() {
-  try { localStorage.setItem(recAudioKey(), JSON.stringify({
-    source: recSourceSelect.value, device: recDeviceSelect.value})); } catch (e) {}
-}
-function updateRecordingDevices(preferred) {
-  const source = recSourceSelect.value;
-  const old = preferred === undefined ? recDeviceSelect.value : preferred;
-  recDeviceSelect.replaceChildren();
-  const add = (value, label) => recDeviceSelect.add(new Option(label, value));
-  if (source === "mic") add("default", "Default Host microphone");
-  else if (source === "hdmi") {
-    add("", "Select Target HDMI input…");
-    if (audioCfg) add("server", "Target HDMI (server capture)");
-  }
-  if (source !== "none") {
-    for (const d of recInputDevices) {
-      if (d.deviceId === "default" || d.deviceId === "communications") continue;
-      add(d.deviceId, (d.label || "Audio input") + " · " + d.deviceId.slice(-6));
-    }
-    if ([...recDeviceSelect.options].some(o => o.value === old)) recDeviceSelect.value = old;
-    else if (source === "hdmi" && audioCfg) recDeviceSelect.value = "server";
-  }
-  recDeviceSelect.hidden = source === "none";
-}
-async function refreshRecordingInputs(requestPermission = false) {
-  if (!navigator.mediaDevices) throw new Error("Audio input needs localhost or HTTPS");
-  if (requestPermission) {
-    // User explicitly clicked Inputs to grant permission and reveal names.
-    const permission = await navigator.mediaDevices.getUserMedia({audio:true, video:false});
-    permission.getTracks().forEach(t => t.stop());
-  }
-  recInputDevices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audioinput");
-  updateRecordingDevices();
-}
-function lockRecordingAudio(locked) {
-  for (const id of ["recAudioSource", "recAudioDevice", "btnRecInputs", "btnRecCheck"])
-    document.getElementById(id).disabled = locked;
-}
-async function openRecordingAudio() {
-  const source = recSourceSelect.value;
-  if (source === "none") return {tracks:[], close(){}};
-  let input, owned = false, meterCtx = null, meterTimer = null;
-  if (source === "hdmi" && recDeviceSelect.value === "server") {
-    if (!audioCfg) throw new Error("Target HDMI audio is not available");
-    if (!IS_LAN) wsSend({type:"audio", on:true});
-    await ensureAudioForRecording();
-    input = recDest.stream;
-  } else {
-    if (!navigator.mediaDevices) throw new Error("Microphone access needs localhost or HTTPS");
-    const id = recDeviceSelect.value;
-    if (source === "hdmi" && (!id || id === "default"))
-      throw new Error("Click Inputs, then select this Target's HDMI capture audio device");
-    const audio = {echoCancellation:false, noiseSuppression:false, autoGainControl:false};
-    if (id && id !== "default") audio.deviceId = {exact:id};
-    input = await navigator.mediaDevices.getUserMedia({video:false, audio});
-    owned = true;
-  }
-  const close = () => {
-    clearInterval(meterTimer);
-    if (meterCtx) meterCtx.close().catch(() => {});
-    if (owned) input.getTracks().forEach(t => t.stop());
-    if (source === "hdmi" && !IS_LAN && !audioOn) wsSend({type:"audio", on:false});
-    document.getElementById("recAudioLevel").value = 0;
-  };
-  const tracks = input.getAudioTracks();
-  if (!tracks.length || tracks.some(t => t.readyState !== "live")) {
-    close(); throw new Error("Selected audio input has no live track");
-  }
-  try {
-    // The meter is never connected to speakers: no microphone monitoring/echo.
-    meterCtx = new AudioContext();
-    await meterCtx.resume();
-    const analyser = meterCtx.createAnalyser();
-    analyser.fftSize = 512;
-    meterCtx.createMediaStreamSource(input).connect(analyser);
-    const samples = new Float32Array(analyser.fftSize);
-    meterTimer = setInterval(() => {
-      analyser.getFloatTimeDomainData(samples);
-      const rms = Math.sqrt(samples.reduce((sum, x) => sum + x*x, 0) / samples.length);
-      document.getElementById("recAudioLevel").value = Math.min(1, rms * 4);
-    }, 100);
-  } catch (e) { close(); throw e; }
-  recAudioStatus.textContent = source === "mic" ? "Host Mic ready" : "Target HDMI ready";
-  return {tracks, close};
-}
-function closeRecordingPreview() {
-  if (recAudioPreview) recAudioPreview.close();
-  recAudioPreview = null;
-  document.getElementById("btnRecCheck").textContent = "Check audio";
-}
-recSourceSelect.addEventListener("change", () => {
-  closeRecordingPreview(); updateRecordingDevices(); rememberRecordingAudio();
-  recAudioStatus.textContent = "";
-});
-recDeviceSelect.addEventListener("change", () => {
-  closeRecordingPreview(); rememberRecordingAudio(); recAudioStatus.textContent = "";
-});
-document.getElementById("btnRecInputs").addEventListener("click", async () => {
-  lockRecordingAudio(true);
-  document.getElementById("btnRec").disabled = true;
-  try { await refreshRecordingInputs(true); }
-  catch (e) { recAudioStatus.textContent = "Audio access failed: " + e.message; }
-  finally { lockRecordingAudio(false); document.getElementById("btnRec").disabled = false; }
-});
-document.getElementById("btnRecCheck").addEventListener("click", async () => {
-  if (recAudioPreview) { closeRecordingPreview(); recAudioStatus.textContent = "Audio check stopped"; return; }
-  lockRecordingAudio(true);
-  document.getElementById("btnRec").disabled = true;
-  try {
-    recAudioPreview = await openRecordingAudio();
-    document.getElementById("btnRecCheck").textContent = "Stop check";
-    await refreshRecordingInputs();
-  } catch (e) { recAudioStatus.textContent = "Audio check failed: " + e.message; }
-  finally { lockRecordingAudio(false); document.getElementById("btnRec").disabled = false; }
-});
-try {
-  const saved = JSON.parse(localStorage.getItem(recAudioKey()) || "null");
-  if (saved && ["mic","hdmi","none"].includes(saved.source)) recSourceSelect.value = saved.source;
-  updateRecordingDevices();
-  refreshRecordingInputs().then(() => {
-    if (saved) updateRecordingDevices(saved.device);
-  }).catch(() => {});
-} catch (e) { updateRecordingDevices(); }
+__RECORDING_AUDIO_CONTROLS__
 
 function recordingConnectionLost() {
   recConnectionReady = false;
   recMediaReady = false;
   recPictureGap = true;
+  recordingBackendAudioConnection(false);
   if (recUpload) {
     recUpload.ready = false;
     recUpload.inflight = null;
@@ -1398,6 +1305,7 @@ function recordingMediaReady() {
   if (!recConnectionReady) return;
   recMediaReady = true;
   recPictureGap = false;
+  recordingBackendAudioConnection(true);
 }
 
 async function maybeResumeRecording() {
@@ -1444,6 +1352,7 @@ async function startRecording() {
   } catch (e) {
     if (recAudioSession) recAudioSession.close();
     recAudioSession = null;
+    syncLegacyAudioPlayback();
     if (recStream) recStream.getVideoTracks().forEach(t => t.stop());
     recStream = null;
     clearInterval(recPaintTimer);
@@ -1476,6 +1385,7 @@ async function startRecordingSession() {
   lockRecordingAudio(true);
   document.getElementById("btnRec").disabled = true;
   recAudioSession = await openRecordingAudio();
+  syncLegacyAudioPlayback();
   recStream = captureDisplayStream();
   // Explicitly remove any audio from <video>.captureStream(): exactly the
   // chosen input (or no audio) is recorded, never a second HDMI track.
@@ -1540,9 +1450,9 @@ async function startRecordingSession() {
       clearInterval(recPaintTimer);
       recPaintTimer = null;
       sessionAudio.close();
-      if (!recAudioStatus.textContent.startsWith("Audio input lost"))
-        recAudioStatus.textContent = "Input released";
+      recAudioStatus.textContent = "Inputs released · Check audio to test or listen again";
       recAudioSession = null;
+      syncLegacyAudioPlayback();
       recStream = null;
       // Keep Saving… until the server confirms every block and manual finish.
       btn.textContent = recConnectionReady ? "Saving…" : "Waiting to upload…";
@@ -1551,12 +1461,8 @@ async function startRecordingSession() {
 
   mediaRecorder.start(1000);        // flush a chunk every second
   recording = true;
-  for (const track of sessionAudio.tracks) track.addEventListener("ended", () => {
-    if (!recording || recAudioSession !== sessionAudio) return;
-    stopRecording();
-    recAudioStatus.textContent = "Audio input lost — recording stopped. Select an input and restart.";
-    showHint(recAudioStatus.textContent);
-  }, {once:true});
+  // The mixer's output track is stable. Physical input loss is handled inside
+  // the mixer and must never stop MediaRecorder or split the recording.
   recStartTime = Date.now();
   const btn = document.getElementById("btnRec");
   btn.disabled = false;
@@ -1590,7 +1496,10 @@ window.addEventListener("beforeunload", (ev) => {
   ev.preventDefault();
   ev.returnValue = "";
 });
-window.addEventListener("pagehide", closeRecordingPreview);
+window.addEventListener("pagehide", () => {
+  closeRecordingPreview();
+  recAudioSession?.close();
+});
 
 function captureDisplayStream() {
   // Stable video track across JPEG/WebRTC reconnects and source track ends.
@@ -1978,6 +1887,9 @@ if (new URLSearchParams(location.search).has("rtc")) {
 # keeps running the OLD code, making edits look like they "didn't take effect".
 # It only changes when _VIEWER_HTML changes, so a plain restart never forces a
 # needless reload.
+_VIEWER_HTML = _VIEWER_HTML.replace("__RECORDING_AUDIO_MIXER__", RECORDING_AUDIO_MIXER_JS).replace(
+    "__RECORDING_AUDIO_CONTROLS__", RECORDING_AUDIO_CONTROLS_JS)
+
 _BUILD_ID = hashlib.md5(_VIEWER_HTML.encode("utf-8")).hexdigest()[:12]
 
 

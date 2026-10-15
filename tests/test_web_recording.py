@@ -5,6 +5,7 @@ import subprocess
 import unittest
 
 from serial_hid_kvm._web_viewer import _VIEWER_HTML
+from serial_hid_kvm._web_audio import RECORDING_AUDIO_MIXER_JS
 
 
 class WebRecordingTests(unittest.TestCase):
@@ -22,7 +23,8 @@ const sent = [], handlers = {}, btn = {classList:{add(){},remove(){}},
   addEventListener(name, fn){handlers[name]=fn;}};
 const elements={btnRec:btn};
 function element(id){
-  if (!elements[id]) elements[id]={value:id==='recAudioSource'?'mic':'default',
+  if (!elements[id]) elements[id]={value:id==='recAudioSource'?'mic':id.endsWith('Gain')?'70':id==='recHdmiDevice'?'':'default',
+    classList:{toggle(){},remove(){}},checked:false,
     options:[],add(o){this.options.push(o);},replaceChildren(){this.options=[];},
     addEventListener(){}};
   return elements[id];
@@ -34,15 +36,23 @@ class Option {constructor(label,value){this.label=label;this.value=value;}}
 let micRequests=0, micClosed=0, denyMic=false;
 const micTrack={readyState:'live',addEventListener(){},stop(){micClosed++;}};
 const navigator={mediaDevices:{
-  async enumerateDevices(){return [];},
+  async enumerateDevices(){return [{kind:'audioinput',deviceId:'earpods-test',label:'EarPods'}];},
   async getUserMedia(){micRequests++; if(denyMic)throw new Error('permission denied');
     return {getTracks(){return [micTrack];},getAudioTracks(){return [micTrack];}};}
 }};
 class AudioContext {
+  constructor(){this.state='running';this.currentTime=0;this.destination={};}
   async resume(){} async close(){}
-  createAnalyser(){return {fftSize:512,getFloatTimeDomainData(){}};}
-  createMediaStreamSource(){return {connect(){}};}
+  node(){return {connect(){},disconnect(){},gain:{value:0,setTargetAtTime(v){this.value=v;}}};}
+  createGain(){return this.node();}
+  createAnalyser(){return {...this.node(),fftSize:512,getFloatTimeDomainData(){}};}
+  createMediaStreamSource(){return this.node();}
+  createMediaStreamDestination(){return {...this.node(),stream:{getAudioTracks(){return [mixedTrack];}}};}
+  createConstantSource(){return {...this.node(),offset:{value:0},start(){},stop(){}};}
+  createDynamicsCompressor(){const n=this.node();for(const p of ['threshold','knee','ratio','attack','release'])n[p]={value:0};return n;}
 }
+const mixedTrack={readyState:'live',stop(){}};
+const playGain=null, audioOn=false;
 const window = {MediaRecorder: true, addEventListener(){}};
 const statusEl = {}, container = {focus(){}}, IS_LAN = true;
 let resultRecordingId = null, resultRecordingPending = false;
@@ -78,7 +88,7 @@ const checks = `
   const requests=()=>sent.filter(x=>typeof x==='string').map(x=>JSON.parse(x));
   assert.equal(requests()[0].type,'rec_session_start');
   assert.equal(recSourceSelect.value,'mic');
-  assert.deepEqual(lastCaptured.audio,[micTrack]);
+  assert.deepEqual(lastCaptured.audio,[mixedTrack]);
   recordingUploadEvent({type:'rec_session_ready',session,next:0});
   mediaRecorder.ondataavailable({data:{size:1,arrayBuffer:async()=>new Uint8Array([1]).buffer}});
   await new Promise(setImmediate);
@@ -153,7 +163,7 @@ const checks = `
   stopRecording(); await mediaRecorder.onstop();
   recordingUploadEvent({type:'rec_session_ready',session:recUpload.id,next:0});
   recordingUploadEvent({type:'rec_session_saved',session:recUpload.id,path:'silent.mp4'});
-  recSourceSelect.value='hdmi'; recDeviceSelect.value='';
+  recSourceSelect.value='hdmi'; recHdmiSelect.value='';
   const beforeFailure=sent.length;
   await startRecording();
   assert.equal(recording,false);
@@ -165,12 +175,12 @@ const checks = `
   assert(statusEl.textContent.includes('permission denied'));
 })()
 `;
-vm.runInNewContext(stubs + input.recorder + checks, {assert, Uint8Array, Promise, setImmediate})
+vm.runInNewContext(stubs + input.mixer + input.recorder + checks, {assert, Uint8Array, Float32Array, Promise, setImmediate})
   .catch(e=>{console.error(e); process.exitCode=1;});
 '''
         result = subprocess.run(
             [shutil.which("node"), "-e", harness],
-            input=json.dumps({"script": script, "recorder": recorder}),
+            input=json.dumps({"script": script, "recorder": recorder, "mixer":RECORDING_AUDIO_MIXER_JS}),
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
