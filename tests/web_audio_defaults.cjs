@@ -1,5 +1,5 @@
 const vm=require('node:vm'),assert=require('node:assert/strict');
-const {controls}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const {controls,pool}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const setup=`
 let recording=false,recFinishing=false,recStarting=false,recAudioSession=null,recAudioPreview=null;
 let recInputDevices=[];
@@ -8,10 +8,10 @@ const elements={};
 class Option{constructor(label,value){this.label=label;this.value=value;}}
 function element(id){return elements[id]??=(
  {value:id==='recAudioSource'?'mic':id.endsWith('Gain')?'100':'',checked:false,
- options:[],classList:{toggle(){},remove(){}},addEventListener(){},
+ options:[],style:{},setAttribute(){},classList:{toggle(){},remove(){},contains(){return false;}},addEventListener(){},
  add(o){this.options.push(o);if(this.options.length===1)this.value=o.value;},
  replaceChildren(){this.options=[];this.value='';}});}
-const document={getElementById:element};
+const document={getElementById:element,addEventListener(){}};
 const location={host:'127.0.0.1:9330'};
 let stored=initial;
 const localStorage={getItem(){return stored?JSON.stringify(stored):null;},setItem(k,v){stored=JSON.parse(v);}};
@@ -27,7 +27,7 @@ const mic=makeDevice('host-earpods','ヘッドセット (EarPods) (05ac:110b)');
 const first=[mic,makeDevice('long057af2','デジタル オーディオ インターフェイス (USB3 Digital Audio) (345f:2131)'),makeDevice('longd0c23b','デジタル オーディオ インターフェイス (3- USB3 Digital Audio) (345f:2131)')];
 async function create(initial,devices,target){
  const c=vm.createContext({initial,devices,Option:undefined});
- vm.runInContext(setup+controls,c);
+ vm.runInContext(setup+pool+controls,c);
  await new Promise(setImmediate);
  vm.runInContext('setRecordingAudioTarget('+JSON.stringify(target)+')',c);
  return {get:code=>vm.runInContext(code,c),ctx:c};

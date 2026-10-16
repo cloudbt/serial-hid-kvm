@@ -24,19 +24,20 @@ const sent = [], handlers = {}, btn = {classList:{add(){},remove(){}},
 const elements={btnRec:btn};
 function element(id){
   if (!elements[id]) elements[id]={value:id==='recAudioSource'?'mic':id.endsWith('Gain')?'70':id==='recHdmiDevice'?'':'default',
-    classList:{toggle(){},remove(){}},checked:false,
+    style:{},setAttribute(){},classList:{toggle(){},remove(){},contains(){return false;}},checked:false,
     options:[],add(o){this.options.push(o);},replaceChildren(){this.options=[];},
     addEventListener(){}};
   return elements[id];
 }
-const document = {getElementById:element, createElement(){return {width:0,height:0,getContext(){return {drawImage(){},fillRect(){},fillText(){}};},captureStream(){return canvas.captureStream();}};}};
+const document = {getElementById:element,addEventListener(){},createElement(){return {width:0,height:0,getContext(){return {drawImage(){},fillRect(){},fillText(){}};},captureStream(){return canvas.captureStream();}};}};
 const location={host:'127.0.0.1:9330'};
 const localStorage={getItem(){return null;},setItem(){}};
 class Option {constructor(label,value){this.label=label;this.value=value;}}
 let micRequests=0, micClosed=0, denyMic=false;
 const micTrack={readyState:'live',addEventListener(){},stop(){micClosed++;}};
 const navigator={mediaDevices:{
-  async enumerateDevices(){return [{kind:'audioinput',deviceId:'earpods-test',label:'EarPods'}];},
+  async enumerateDevices(){return [{kind:'audioinput',deviceId:'earpods-test',label:'EarPods'},
+    {kind:'audioinput',deviceId:'hdmi057af2',label:'(USB3 Digital Audio)'}];},
   async getUserMedia(){micRequests++; if(denyMic)throw new Error('permission denied');
     return {getTracks(){return [micTrack];},getAudioTracks(){return [micTrack];}};}
 }};
@@ -173,6 +174,33 @@ const checks = `
   assert.equal(recording,false);
   assert.equal(sent.length,beforeFailure);
   assert(statusEl.textContent.includes('permission denied'));
+  // Standalone listening opens ONLY HDMI, even with No audio recording selected.
+  denyMic=false;recSourceSelect.value='none';setRecordingAudioTarget('target1');
+  recHdmiSelect.value='auto';
+  const beforeListen=micRequests;
+  await startHdmiMonitoring();
+  assert.equal(micRequests,beforeListen+1);
+  assert.equal(hdmiMonitor.mixer.inputs.has('mic'),false);
+  const listener=hdmiMonitor;
+  // Record->Stop must leave the listener alive and the requested state on.
+  recSourceSelect.value='hdmi';
+  await startRecording();
+  assert.equal(micRequests,beforeListen+1,'HDMI capture must be shared');
+  stopRecording();await mediaRecorder.onstop();
+  recordingUploadEvent({type:'rec_session_saved',session:recUpload.id,path:'listen.mp4'});
+  assert.equal(hdmiMonitor,listener);
+  assert.equal(hdmiMonitorWanted,true);
+  assert.equal(listener.mixer.closed,false);
+  // Listener->Off while recording must leave the recorder output alive.
+  await startRecording();
+  const outputTrack=recAudioSession.tracks[0];
+  stopHdmiMonitoring();
+  assert.equal(recording,true);
+  assert.equal(recAudioSession.tracks[0],outputTrack);
+  assert.equal(recAudioSession.mixer.closed,false);
+  assert.equal(hdmiMonitorWanted,false);
+  stopRecording();await mediaRecorder.onstop();
+  recordingUploadEvent({type:'rec_session_saved',session:recUpload.id,path:'record-only.mp4'});
 })()
 `;
 vm.runInNewContext(stubs + input.mixer + input.recorder + checks, {assert, Uint8Array, Float32Array, Promise, setImmediate})

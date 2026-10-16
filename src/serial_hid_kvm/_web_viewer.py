@@ -266,7 +266,7 @@ body.tb-hidden #container{height:100%}
 #recordMenu>summary{background:#0f3460;border:1px solid #1a1a5e;border-radius:0 5px 5px 0;padding:3px 7px}
 .record-panel{width:min(420px,calc(100vw - 24px));left:auto;right:0}
 .rec-channel{border-top:1px solid #384b66;padding-top:10px;margin-top:12px}
-.rec-channel[hidden],#recMonitorControls[hidden]{display:none}
+.rec-channel[hidden]{display:none}
 .rec-channel-title{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px}
 .rec-channel-state{color:#aebcd0;font-size:11px;overflow-wrap:anywhere}
 .rec-channel-state.interrupted{color:#ffb48c}
@@ -275,7 +275,15 @@ body.tb-hidden #container{height:100%}
 .record-panel .rec-mute{display:flex;gap:5px;margin:0;white-space:nowrap}
 .rec-level{display:flex;align-items:center;gap:10px;color:#aebcd0;font-size:11px}
 .rec-level meter{flex:1;min-width:40px;height:12px}
-.record-panel .rec-check{justify-content:flex-start;gap:8px}
+.hdmi-monitor-controls{display:flex;align-items:center;gap:7px;flex-shrink:0}
+.hdmi-monitor-volume{display:flex;align-items:center;gap:7px;position:relative}
+#recMonitorGain{width:85px;display:block;accent-color:#80b7ff}
+#recMonitorGainValue{font-size:12px;min-width:32px;color:#b7c6dc;font-variant-numeric:tabular-nums}
+#btnMonitorVolume{display:none}
+#btnHdmiMonitor[aria-pressed=false]{color:#9daec5}
+#btnHdmiMonitor.monitor-error{border-color:#e2a96d;color:#ffd3a0}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(max-width:900px){#btnMonitorVolume{display:block}#recMonitorGainValue{display:none}#hdmiVolumePanel{display:none;position:absolute;top:34px;right:0;padding:14px;background:#18263b;border:1px solid #384b66;border-radius:7px;box-shadow:0 10px 30px #0008;z-index:12}#hdmiVolumePanel.open{display:block}#recMonitorGain{width:140px}}
 .status-group{margin-left:auto;min-width:0;flex-shrink:1;overflow:visible}
 .status-group>summary{min-width:0;max-width:300px}
 #status{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0}
@@ -299,6 +307,7 @@ body:has(#toolbar details[open]) #recordingResult{display:none}
 body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
 @media(max-width:850px){#targetName{display:none}.status-group>summary{max-width:160px}.record-panel{position:fixed;left:auto;right:8px;top:46px}}
 @media(max-width:600px){#toolbar{padding:6px;gap:3px}.status-group{display:none}.tool-divider{margin:0 1px}.tool-group>summary[data-compact]{font-size:0;padding:3px 7px}.tool-group>summary[data-compact]::after{content:attr(data-compact);font-size:16px}#toolbar #btnFs{font-size:0;padding:3px 8px}#btnFs::after{content:"⛶";font-size:17px}#toolbar #btnAudio{font-size:0;padding:3px 7px}#btnAudio::after{content:"♫";font-size:16px}.tool-panel,.record-panel{position:fixed;top:46px;left:8px;right:8px;width:auto;max-width:400px}}
+@media(max-width:600px){body{display:flex;flex-direction:column}#toolbar{flex-wrap:wrap;height:auto;min-height:40px}#container{flex:1;min-height:0}.hdmi-monitor-name{display:none}.hdmi-monitor-controls,.hdmi-monitor-volume{gap:3px}#hdmiVolumePanel{position:fixed;top:82px;left:8px;right:auto}#recordingResult{top:auto;bottom:12px}}
 </style>
 </head>
 <body>
@@ -357,10 +366,6 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
           <div class="rec-channel-title"><label for="recHdmiGain">Record volume <output id="recHdmiGainValue">100%</output></label><label class="rec-mute"><input id="recHdmiMute" type="checkbox">Mute</label></div>
           <input id="recHdmiGain" type="range" min="0" max="200" value="100" aria-label="Target HDMI recording volume">
           <div class="rec-level">Input level <meter id="recHdmiLevel" aria-label="Target HDMI input level" min="0" max="1" value="0"></meter></div>
-          <label class="rec-check"><input id="recMonitor" type="checkbox">Listen to HDMI on Host headphones</label>
-          <div id="recMonitorControls" hidden><label for="recMonitorGain">Listen volume <output id="recMonitorGainValue">50%</output></label>
-          <input id="recMonitorGain" type="range" min="0" max="100" value="50" aria-label="HDMI headphone monitoring volume">
-          <p>Uses Host default playback device. Select EarPods in Windows. Active during audio check or recording; does not change recorded volume.</p></div>
         </section>
         <div class="panel-row"><button id="btnRecInputs" title="Allow audio access and refresh devices">Inputs</button>
         <button id="btnRecCheck" title="Check audio without recording">Check audio</button></div>
@@ -370,6 +375,15 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
         <p id="recordingActionStatus" role="status"></p>
       </div>
     </details>
+  </div>
+  <div class="hdmi-monitor-controls" id="hdmiMonitorControls" role="group" aria-label="HDMI listening">
+    <button id="btnHdmiMonitor" type="button" aria-pressed="false" aria-label="Listen to Target HDMI" title="Listen to Target HDMI through Host default playback device. Does not change recorded audio.">🎧<span class="hdmi-monitor-name"> HDMI</span></button>
+    <div class="hdmi-monitor-volume">
+      <button id="btnMonitorVolume" type="button" aria-expanded="false" aria-controls="hdmiVolumePanel" aria-label="Show HDMI listen volume">50%</button>
+      <div id="hdmiVolumePanel"><label class="sr-only" for="recMonitorGain">Listen volume</label><input id="recMonitorGain" type="range" min="0" max="100" value="50" aria-label="HDMI headphone monitoring volume" title="HDMI listen volume — does not change recorded audio"></div>
+      <output id="recMonitorGainValue" for="recMonitorGain">50%</output>
+    </div>
+    <span id="hdmiMonitorStatus" class="sr-only" role="status" aria-live="polite">HDMI listening off</span>
   </div>
   <details class="tool-group status-group">
     <summary title="Connection and capture details"><span id="status">Connecting…</span><span id="targetName"></span></summary>
@@ -1006,7 +1020,7 @@ let audioNode = null;
 let audioCfg = null;
 let playGain = null;   // controls speaker playback volume (mute = 0)
 let recDest = null;    // MediaStreamDestination feeding the recorder
-let audioOn = true;    // speaker playback enabled by default
+let audioOn = false;   // listening starts only from the toolbar HDMI button
 
 const WORKLET_SRC = `
 class P extends AudioWorkletProcessor {
@@ -1038,17 +1052,11 @@ registerProcessor("p", P);
 function setupAudioConfig(cfg) {
   audioCfg = cfg;
   const btn = document.getElementById("btnAudio");
-  btn.style.display = "";
-  // The server tells us the subscription state it started this client
-  // with: LAN clients get the always-on feed (original behaviour), WAN
-  // clients start unsubscribed to keep ~1.5 Mbps of PCM off the uplink.
-  audioOn = cfg.on !== false;
-  if (audioOn) {
-    enableAudioPlayback();   // default-on, no manual click needed
-  } else {
-    btn.textContent = "\u{1f507} Audio";
-    btn.classList.remove("active");
-  }
+  // Keep the legacy control hidden: the toolbar HDMI listener is the only
+  // playback owner. A recording subscription must not implicitly play audio.
+  btn.style.display = "none";
+  audioOn = false;
+  syncLegacyAudioPlayback();
 }
 
 // Start speaker playback and reflect the on-state on the button. Browsers block
@@ -1497,6 +1505,7 @@ window.addEventListener("beforeunload", (ev) => {
   ev.returnValue = "";
 });
 window.addEventListener("pagehide", () => {
+  stopHdmiMonitoring();
   closeRecordingPreview();
   recAudioSession?.close();
 });

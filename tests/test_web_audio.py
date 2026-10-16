@@ -23,7 +23,8 @@ class WebAudioMixerTests(unittest.TestCase):
     def test_target_specific_defaults_and_saved_overrides(self):
         result = subprocess.run(
             [shutil.which("node"), str(Path(__file__).with_name("web_audio_defaults.cjs"))],
-            input=json.dumps({"controls": RECORDING_AUDIO_CONTROLS_JS}),
+            input=json.dumps({"controls": RECORDING_AUDIO_CONTROLS_JS,
+                              "pool":RECORDING_AUDIO_MIXER_JS.split("class RecordingAudioMixer", 1)[0]}),
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)

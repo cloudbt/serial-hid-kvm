@@ -538,15 +538,22 @@ Recording audio is selected independently of speaker playback:
   suppression. The mixer includes compression to reduce overload on summing.
 
 Use **Check audio** to see both input levels without saving a recording. Click
-it again to release the inputs. Optional **Listen to HDMI on Host headphones**
-works during checking or recording through the Host's default playback device;
-set that device to EarPods in Windows. Its volume is independent of recording
-volume/mute. The microphone is never sent to playback. Monitoring starts off on
-page load. Legacy HDMI playback is suppressed while the mixer owns HDMI, so it
-cannot be heard twice. Stop recording before changing mode or input devices;
-volume, mute and monitoring can be changed during recording. Mode, devices and
-volumes are remembered separately for each viewer origin (port), including old
-single-device preferences. Access is released when checking/recording stops.
+it again to release the checking inputs. The **🎧 HDMI** button immediately to
+the right of **Record** independently starts/stops listening through the Host's
+default playback device; set that device to EarPods or your speaker in Windows.
+The adjacent slider and percentage control listening volume, independently of
+recording volume/mute. Narrow windows show a percentage button that opens the
+same slider. There are no duplicate listening controls in the recording menu.
+
+Listening works without recording or audio checking, and never opens Host Mic.
+Stopping recording/checking leaves listening on if requested; stopping listening
+leaves recording running. Shared capture leases release the physical HDMI input
+only after all consumers stop. The microphone is never sent to playback. Listening
+starts off on page load and remembers volume only. Legacy playback is suppressed
+to avoid hearing HDMI twice. Interrupted listening retries the selected device.
+Stop recording before changing mode or input devices; volume and mute remain
+adjustable. Mode, devices and volumes are remembered separately for each viewer
+origin (port), including old single-device preferences. Unloading releases inputs.
 
 Device selectors offer an automatically selected **Default** option: **EarPods**
 for Host Mic, **Target1 HDMI** (the card ending `057AF2` at port 9330) for Target1,

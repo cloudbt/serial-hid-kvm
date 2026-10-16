@@ -8,6 +8,13 @@ const recAudioStatus = document.getElementById("recAudioStatus");
 const recInputStates = {mic:"idle", hdmi:"idle"};
 let recAudioBusy = false;
 let recAudioTarget = "";
+const recAudioInputs = new RecordingAudioInputPool();
+let recServerAudioRefs = 0;
+let recServerAudioConnected = true;
+let hdmiMonitor = null;
+let hdmiMonitorWanted = false;
+let hdmiMonitorEpoch = 0;
+let hdmiMonitorState = "off";
 const recEl = id => document.getElementById(id);
 // IDs are origin-scoped: the same card has a different ID at :9332. Match the
 // user-confirmed :9330 suffixes, then the distinct Windows device names.
@@ -69,21 +76,114 @@ function updateRecordingDevices(preferredMic, preferredHdmi) {
 function updateRecordingAudioControls() {
   recEl("recMicChannel").hidden = !recUses("mic");
   recEl("recHdmiChannel").hidden = !recUses("hdmi");
-  recEl("recMonitorControls").hidden = !recEl("recMonitor").checked;
   for (const name of ["Mic","Hdmi","Monitor"])
     recEl("rec"+name+"GainValue").textContent = recEl("rec"+name+"Gain").value + "%";
+  recEl("btnMonitorVolume").textContent = recEl("recMonitorGain").value + "%";
 }
 function syncLegacyAudioPlayback() {
-  const hdmiOwned = recAudioSession?.hasHdmi || recAudioPreview?.hasHdmi;
-  if (playGain) playGain.gain.value = audioOn && !hdmiOwned ? 1 : 0;
-  const btn = recEl("btnAudio");
-  btn.disabled = !!hdmiOwned;
-  btn.title = hdmiOwned ? "Use HDMI monitoring in Recording audio" : "Toggle audio playback";
+  // There is one playback control: the independent toolbar HDMI listener.
+  if (playGain) playGain.gain.value = 0;
+  recEl("btnAudio").style.display = "none";
 }
 function recordingBackendAudioConnection(connected) {
-  const active = recAudioSession || recAudioPreview;
-  if (recHdmiSelect.value === "server") active?.mixer?.setInputAvailable("hdmi", connected);
+  if (connected && !recServerAudioConnected && recServerAudioRefs && !IS_LAN)
+    wsSend({type:"audio", on:true});
+  recServerAudioConnected = connected;
+  for (const active of [recAudioSession, recAudioPreview])
+    if (active?.serverHdmi) active.mixer?.setInputAvailable("hdmi", connected);
+  if (hdmiMonitor?.serverHdmi) hdmiMonitor.mixer.setInputAvailable("hdmi", connected);
 }
+function selectedRecordingDevice(name) {
+  const id = (name === "mic" ? recDeviceSelect : recHdmiSelect).value;
+  if (id !== "auto") return id;
+  const device = recordingDefaultDevice(name);
+  if (!device) throw new Error(name === "mic"
+    ? "Default EarPods microphone not available. Connect EarPods and click Inputs, or choose a microphone manually."
+    : "Default " + (recHdmiDefaults[recAudioTarget]?.label || "Target HDMI") + " not available. Click Inputs or choose its HDMI device manually.");
+  return device.deviceId;
+}
+function recordingInputLease(deviceId) {
+  if (deviceId !== "server") return {deviceId, open:id => recAudioInputs.acquire(id || deviceId)};
+  return {deviceId, open:async () => {
+    if (!audioCfg) throw new Error("Target HDMI audio is not available");
+    await ensureAudioForRecording();
+    recServerAudioRefs++;
+    if (!IS_LAN) wsSend({type:"audio", on:true});
+    let released = false;
+    return {stream:recDest.stream, close(){
+      if (released) return;
+      released = true;
+      if (--recServerAudioRefs === 0 && !IS_LAN) wsSend({type:"audio", on:false});
+    }};
+  }};
+}
+function updateHdmiMonitorControls(detail = "") {
+  const btn = recEl("btnHdmiMonitor");
+  const state = hdmiMonitorState;
+  btn.setAttribute("aria-pressed", String(hdmiMonitorWanted));
+  btn.classList.toggle("active", hdmiMonitorWanted);
+  btn.classList.toggle("monitor-error", state === "interrupted" || state === "error");
+  const status = state === "off" ? "HDMI listening off" : state === "opening"
+    ? "Opening HDMI input…" : state === "live" ? "Listening to Target HDMI"
+    : state === "interrupted" ? "HDMI input interrupted — waiting for recovery" : "HDMI listening failed";
+  recEl("hdmiMonitorStatus").textContent = status + (detail ? ": " + detail : "");
+  btn.title = status + (detail ? ": " + detail : "") + ". Output: Host default playback device; does not change recorded audio.";
+}
+function stopHdmiMonitoring() {
+  hdmiMonitorWanted = false;
+  ++hdmiMonitorEpoch;
+  hdmiMonitor?.mixer.close();
+  hdmiMonitor = null;
+  hdmiMonitorState = "off";
+  updateHdmiMonitorControls();
+}
+async function startHdmiMonitoring() {
+  const epoch = ++hdmiMonitorEpoch;
+  hdmiMonitorWanted = true;
+  hdmiMonitorState = "opening";
+  updateHdmiMonitorControls();
+  let mixer;
+  try {
+    await refreshRecordingInputs();
+    if (epoch !== hdmiMonitorEpoch) return;
+    const id = selectedRecordingDevice("hdmi");
+    if (!id || id === "default") throw new Error("Select this Target's HDMI input in Recording audio");
+    mixer = new RecordingAudioMixer({onState(name, state, detail){
+      if (epoch !== hdmiMonitorEpoch) return;
+      hdmiMonitorState = state;
+      updateHdmiMonitorControls(detail);
+    }});
+    // Open muted. A canceled pending request must never play even briefly.
+    await mixer.open({inputs:{hdmi:{...recordingInputLease(id), gain:0}}, monitor:false});
+    if (epoch !== hdmiMonitorEpoch) { mixer.close(); return; }
+    hdmiMonitor = {mixer, serverHdmi:id === "server"};
+    mixer.setMonitoring(true, Number(recEl("recMonitorGain").value)/100);
+  } catch (error) {
+    mixer?.close();
+    if (epoch !== hdmiMonitorEpoch) return;
+    hdmiMonitorWanted = false;
+    hdmiMonitorState = "error";
+    updateHdmiMonitorControls(error.message);
+    showHint("HDMI listening failed: " + error.message);
+  }
+}
+recEl("btnHdmiMonitor").addEventListener("click", () => {
+  if (hdmiMonitorWanted) stopHdmiMonitoring(); else startHdmiMonitoring();
+});
+recEl("btnMonitorVolume").addEventListener("click", () => {
+  const panel = recEl("hdmiVolumePanel");
+  const open = !panel.classList.contains("open");
+  panel.classList.toggle("open", open);
+  recEl("btnMonitorVolume").setAttribute("aria-expanded", String(open));
+});
+function closeHdmiVolumePanel() {
+  recEl("hdmiVolumePanel").classList.remove("open");
+  recEl("btnMonitorVolume").setAttribute("aria-expanded", "false");
+}
+document.addEventListener("pointerdown", e => {
+  if (!recEl("hdmiMonitorControls").contains(e.target)) closeHdmiVolumePanel();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeHdmiVolumePanel(); });
 async function refreshRecordingInputs(requestPermission = false) {
   if (!navigator.mediaDevices) throw new Error("Audio input needs localhost or HTTPS");
   if (requestPermission) {
@@ -100,30 +200,13 @@ function lockRecordingAudio(locked) {
 async function openRecordingAudio() {
   if (recSourceSelect.value === "none") return {tracks:[], close(){}};
   await refreshRecordingInputs();
-  const selectedDevice = name => {
-    const id = (name === "mic" ? recDeviceSelect : recHdmiSelect).value;
-    if (id !== "auto") return id;
-    const device = recordingDefaultDevice(name);
-    if (!device) throw new Error(name === "mic"
-      ? "Default EarPods microphone not available. Connect EarPods and click Inputs, or choose a microphone manually."
-      : "Default " + (recHdmiDefaults[recAudioTarget]?.label || "Target HDMI") + " not available. Click Inputs or choose its HDMI device manually.");
-    return device.deviceId;
-  };
   const inputs = {};
-  if (recUses("mic")) inputs.mic = {deviceId:selectedDevice("mic"),
+  if (recUses("mic")) inputs.mic = {...recordingInputLease(selectedRecordingDevice("mic")),
     gain:Number(recEl("recMicGain").value)/100, muted:recEl("recMicMute").checked};
   if (recUses("hdmi")) {
-    const id = selectedDevice("hdmi");
+    const id = selectedRecordingDevice("hdmi");
     if (!id || id === "default") throw new Error("Click Inputs, then select this Target's HDMI capture audio device");
-    inputs.hdmi = {deviceId:id, gain:Number(recEl("recHdmiGain").value)/100, muted:recEl("recHdmiMute").checked};
-    if (id === "server") inputs.hdmi.open = async () => {
-      if (!audioCfg) throw new Error("Target HDMI audio is not available");
-      if (!IS_LAN) wsSend({type:"audio", on:true});
-      await ensureAudioForRecording();
-      return {stream:recDest.stream, close(){
-        if (!IS_LAN && !audioOn) wsSend({type:"audio", on:false});
-      }};
-    };
+    inputs.hdmi = {...recordingInputLease(id), gain:Number(recEl("recHdmiGain").value)/100, muted:recEl("recHdmiMute").checked};
     if (inputs.mic && inputs.mic.deviceId !== "default" && inputs.mic.deviceId === id)
       throw new Error("Host Mic and Target HDMI must be different input devices");
   }
@@ -148,15 +231,13 @@ async function openRecordingAudio() {
       }
     }
   });
-  await mixer.open({inputs, monitor:recUses("hdmi") && recEl("recMonitor").checked,
-    monitorVolume:Number(recEl("recMonitorGain").value)/100});
+  await mixer.open({inputs, monitor:false});
   // Gain controls remain usable while a permission/device open is pending.
   for (const name of ["Mic","Hdmi"]) {
     mixer.setGain(name.toLowerCase(), Number(recEl("rec"+name+"Gain").value)/100);
     mixer.setMuted(name.toLowerCase(), recEl("rec"+name+"Mute").checked);
   }
-  mixer.setMonitoring(recUses("hdmi") && recEl("recMonitor").checked, Number(recEl("recMonitorGain").value)/100);
-  return {mixer, hasHdmi:!!inputs.hdmi, tracks:mixer.tracks, close(){
+  return {mixer, hasHdmi:!!inputs.hdmi, serverHdmi:inputs.hdmi?.deviceId === "server", tracks:mixer.tracks, close(){
     mixer.close();
     for (const id of ["recAudioLevel","recHdmiLevel"]) recEl(id).value = 0;
     for (const id of ["recMicState","recHdmiState"]) {
@@ -176,6 +257,9 @@ recSourceSelect.addEventListener("change", () => {
 });
 for (const select of [recDeviceSelect, recHdmiSelect]) select.addEventListener("change", () => {
   closeRecordingPreview(); rememberRecordingAudio(); recAudioStatus.textContent = "";
+  if (select === recHdmiSelect && hdmiMonitorWanted) {
+    stopHdmiMonitoring(); startHdmiMonitoring();
+  }
 });
 for (const name of ["Mic","Hdmi"]) {
   const source = name.toLowerCase();
@@ -187,8 +271,8 @@ for (const name of ["Mic","Hdmi"]) {
     (recAudioSession || recAudioPreview)?.mixer?.setMuted(source, recEl("rec"+name+"Mute").checked);
   });
 }
-for (const id of ["recMonitor","recMonitorGain"]) recEl(id).addEventListener("input", () => {
-  (recAudioSession || recAudioPreview)?.mixer?.setMonitoring(recEl("recMonitor").checked, Number(recEl("recMonitorGain").value)/100);
+recEl("recMonitorGain").addEventListener("input", () => {
+  hdmiMonitor?.mixer.setMonitoring(true, Number(recEl("recMonitorGain").value)/100);
   updateRecordingAudioControls(); rememberRecordingAudio();
 });
 recEl("btnRecInputs").addEventListener("click", async () => {
@@ -232,6 +316,7 @@ try {
     updateRecordingDevices();
   }).catch(() => {});
 } catch (e) { updateRecordingDevices(); }
+updateHdmiMonitorControls();
 navigator.mediaDevices?.addEventListener?.("devicechange", () => {
   refreshRecordingInputs().catch(() => {});
 });

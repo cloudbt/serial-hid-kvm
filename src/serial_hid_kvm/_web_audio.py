@@ -1,6 +1,44 @@
 """Browser recording mixer, embedded in the viewer without a JS build step."""
 
 RECORDING_AUDIO_MIXER_JS = r"""
+// Reference-count capture leases so listening and recording can share one
+// physical input without either consumer stopping the other's tracks.
+class RecordingAudioInputPool {
+  constructor() { this.entries = new Map(); }
+  async acquire(deviceId) {
+    const key = deviceId || "default";
+    let entry = this.entries.get(key);
+    if (entry?.stream && entry.stream.getAudioTracks().some(t => t.readyState !== "live")) {
+      this.entries.delete(key); entry = null;
+    }
+    if (!entry) {
+      entry = {refs:0, stream:null};
+      this.entries.set(key, entry);
+      const audio = {echoCancellation:false, noiseSuppression:false, autoGainControl:false};
+      if (key !== "default") audio.deviceId = {exact:key};
+      entry.pending = navigator.mediaDevices.getUserMedia({video:false, audio})
+        .then(stream => { entry.stream = stream; return stream; });
+    }
+    entry.refs++;
+    try {
+      const stream = await entry.pending;
+      let released = false;
+      return {stream, close:() => {
+        if (released) return;
+        released = true;
+        if (--entry.refs === 0) {
+          if (this.entries.get(key) === entry) this.entries.delete(key);
+          stream.getTracks().forEach(t => t.stop());
+        }
+      }};
+    } catch (error) {
+      entry.refs--;
+      if (this.entries.get(key) === entry) this.entries.delete(key);
+      throw error;
+    }
+  }
+}
+
 class RecordingAudioMixer {
   constructor({onState = () => {}, onLevel = () => {}} = {}) {
     this.onState = onState;
@@ -68,7 +106,7 @@ class RecordingAudioMixer {
     let resource = null;
     try {
       if (slot.open) {
-        resource = await slot.open();
+        resource = await slot.open(slot.actualId || slot.deviceId);
       } else {
         if (!navigator.mediaDevices) throw new Error("Audio input needs localhost or HTTPS");
         const audio = {echoCancellation:false, noiseSuppression:false, autoGainControl:false};

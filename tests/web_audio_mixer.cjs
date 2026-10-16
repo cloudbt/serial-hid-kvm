@@ -89,6 +89,21 @@ const checks = `
  pending=new Promise(r=>resolve=r);now+=4000;late._tick();late.close();
  const orphan=track('mic');resolve(stream(orphan));await new Promise(setImmediate);
  assert.equal(orphan.stops,1);assert.equal(late.tracks[0].readyState,'ended');pending=null;
+ // Listening and recording lease the same HDMI capture, with independent
+ // output graphs. Releasing either consumer must leave the other one live.
+ const pool=new RecordingAudioInputPool();
+ const beforeShared=requests.length;
+ const [listen,record]=await Promise.all([pool.acquire('shared-hdmi'),pool.acquire('shared-hdmi')]);
+ assert.equal(requests.length,beforeShared+1);
+ assert.equal(listen.stream,record.stream);
+ const sharedTrack=listen.stream.getAudioTracks()[0];
+ record.close();record.close();assert.equal(sharedTrack.readyState,'live');
+ listen.close();assert.equal(sharedTrack.stops,1);assert.equal(pool.entries.size,0);
+ const deadLease=await pool.acquire('shared-hdmi');
+ deadLease.stream.getAudioTracks()[0].readyState='ended';
+ const recovered=await pool.acquire('shared-hdmi');
+ deadLease.close();assert.equal(recovered.stream.getAudioTracks()[0].readyState,'live');
+ recovered.close();assert.equal(pool.entries.size,0);
 })()
 `;
 vm.runInNewContext(harness+mixer+checks,{assert,Float32Array,setImmediate,Promise})

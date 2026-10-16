@@ -1,6 +1,7 @@
 """Real media export and WebSocket recording lifecycle regression tests."""
 import asyncio
 import json
+import io
 from pathlib import Path
 import shutil
 import subprocess
@@ -9,7 +10,7 @@ from unittest.mock import patch
 import pytest
 import websockets
 
-from serial_hid_kvm._recording import convert_recording
+from serial_hid_kvm._recording import convert_recording, _timeline
 from tests.test_web_auth import _make_server
 
 
@@ -47,6 +48,19 @@ def test_missing_tools_keep_source(tmp_path):
         with pytest.raises(RuntimeError, match="unavailable"):
             convert_recording(source)
     assert source.read_bytes() == b"original"
+
+
+def test_reordered_video_packet_intervals_do_not_extend_past_last_frame(tmp_path):
+    class Probe:
+        # Presentation timestamps differ from decode order; a capture gap is
+        # reflected in an earlier packet interval, not extra content at the end.
+        stdout = io.StringIO("0.000,0.033\n3.000,0.660\n3.164,0.033\n3.131,0.001\n")
+        def wait(self, timeout): return 0
+        def poll(self): return 0
+    with patch("serial_hid_kvm._recording.subprocess.Popen", return_value=Probe()):
+        count, duration = _timeline("ffprobe", tmp_path / "capture.mp4")
+    assert count == 4
+    assert duration == pytest.approx(3.197)
 
 
 @pytest.mark.parametrize("disconnect", [False, True])

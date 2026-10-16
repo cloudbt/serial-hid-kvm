@@ -21,7 +21,7 @@ def _run(args):
 def _timeline(probe, path):
     # Streaming scan: browser WebM often has no duration header. Do not load
     # millions of packets into memory for long recordings.
-    count, first, end = 0, math.inf, 0.0
+    count, first, last, last_duration = 0, math.inf, -math.inf, 0.0
     with tempfile.TemporaryFile(mode="w+b") as errors:
         proc = subprocess.Popen(
             [probe, "-v", "error", "-select_streams", "v:0", "-show_packets",
@@ -41,7 +41,12 @@ def _timeline(probe, path):
                     continue
                 count += 1
                 first = min(first, pts)
-                end = max(end, pts + duration)
+                # H.264 B-frames arrive in decode order. A packet's DTS-based
+                # interval can span an earlier capture gap and must not extend
+                # the timeline past later presentation frames. Only the final
+                # presentation frame contributes the trailing duration.
+                if pts >= last:
+                    last, last_duration = pts, duration
             code = proc.wait(timeout=60)
             if code or not count:
                 raise RuntimeError("No readable video packets in recording")
@@ -50,7 +55,7 @@ def _timeline(probe, path):
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
-    return count, end - first
+    return count, last + last_duration - first
 
 
 def convert_recording(source, destination=None):
