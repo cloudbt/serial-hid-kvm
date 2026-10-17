@@ -1,7 +1,7 @@
 """TCP client for KVM Server.
 
 Provides a synchronous, thread-safe interface for sending commands to the
-KVM server via JSON Lines over TCP.  Auto-reconnects on connection loss.
+KVM server via JSON Lines over TCP. Only read-only requests may be replayed.
 """
 
 import base64
@@ -23,7 +23,7 @@ class KvmClient:
     """Synchronous TCP client for the KVM server JSON Lines API.
 
     Thread-safe: all socket I/O is serialised with a lock.
-    Auto-reconnects on send failure (one retry).
+    Reconnects once for read-only requests. Input requests are never replayed.
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 9329,
@@ -80,7 +80,8 @@ class KvmClient:
         """Send a request and return the result dict.
 
         Raises KvmClientError on server-side errors.
-        Auto-reconnects once on connection failure.
+        Read-only requests reconnect once on connection failure. An input
+        failure can mean partial/completed delivery; never replay it.
         """
         params = params or {}
         req_id = uuid.uuid4().hex[:8]
@@ -90,8 +91,12 @@ class KvmClient:
             "params": params,
         }, ensure_ascii=False) + "\n"
 
+        retryable = method in {
+            "ping", "capture_frame", "get_device_info", "list_capture_devices",
+            "get_timing",
+        }
         with self._lock:
-            for attempt in range(2):
+            for attempt in range(2 if retryable else 1):
                 try:
                     if self._sock is None:
                         self._connect_unlocked()
@@ -107,7 +112,7 @@ class KvmClient:
                     return resp.get("result", {})
                 except (ConnectionError, OSError, json.JSONDecodeError) as e:
                     self._close_unlocked()
-                    if attempt == 0:
+                    if retryable and attempt == 0:
                         logger.warning(f"KVM connection lost, reconnecting: {e}")
                         time.sleep(0.5)
                         continue

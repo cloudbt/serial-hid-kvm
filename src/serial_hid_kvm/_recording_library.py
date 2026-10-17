@@ -52,6 +52,7 @@ class RecordingLibrary:
                 state = 'MP4 ready' if path == destination else self.source_state(source)
                 name = destination.name if path == destination else destination.with_suffix('.webm').name
                 entries[key] = self.entry(key, path, name, state)
+                entries[key]['session_id'] = data.get('id')
             except (OSError, ValueError, KeyError, TypeError):
                 continue
         return entries
@@ -68,14 +69,21 @@ class RecordingLibrary:
     def sign(self, relative, expires):
         return hmac.new(self.secret, f'{relative}\n{expires}'.encode(), hashlib.sha256).hexdigest()
 
-    def items(self):
-        entries = sorted(self.catalog().values(), key=lambda item: item['modified'], reverse=True)[:10]
+    def file_url(self, relative):
+        self.confined(self.root / relative)
+        expires = str(int(time.time()) + 12 * 3600)
+        return '/recordings/file?' + urlencode(dict(file=relative, expires=expires, key=self.sign(relative, expires)))
+
+    def items(self, limit=10):
+        entries = sorted(self.catalog().values(), key=lambda item: item['modified'], reverse=True)
+        if limit is not None:
+            entries = entries[:limit]
         result = []
         expires = str(int(time.time()) + 12 * 3600)
         for entry in entries:
             item = {k: v for k, v in entry.items() if k != 'path'}
             relative = entry['path'].relative_to(self.root).as_posix()
-            item['url'] = '/recordings/file?' + urlencode(dict(file=relative, expires=expires, key=self.sign(relative, expires)))
+            item['url'] = self.file_url(relative)
             result.append(item)
         return result
 

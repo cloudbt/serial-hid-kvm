@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import re
 import threading
+from datetime import datetime
+import math
 
 
 class RecordingSessions:
@@ -80,7 +82,7 @@ class RecordingSessions:
             self._save(manifest, state)
             return state
 
-    def finish(self, session, expected):
+    def finish(self, session, expected, metadata=None):
         with self.lock:
             manifest, source = self._paths(session)
             state = json.loads(manifest.read_text(encoding="utf-8"))
@@ -89,5 +91,15 @@ class RecordingSessions:
             if not state["size"]:
                 raise ValueError("Recording is empty")
             state["finished"] = True
+            if isinstance(metadata, dict) and not state.get('recorded_end_at'):
+                # Optional browser facts must never prevent durable saving.
+                try:
+                    ended = datetime.fromisoformat(str(metadata.get('recorded_end_at', '')).replace('Z', '+00:00'))
+                    duration = float(metadata.get('duration_seconds', 0))
+                    if ended.tzinfo and math.isfinite(duration) and 0 <= duration <= 7*24*3600:
+                        state['recorded_end_at'] = ended.isoformat()
+                        state['duration_seconds'] = duration
+                except (ValueError, TypeError):
+                    pass
             self._save(manifest, state)
             return source, self.directory / state["filename"]

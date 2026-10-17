@@ -71,6 +71,12 @@ class Config:
         # Screen recording (web viewer): directory where the browser-recorded
         # .webm files are saved by the server.  Default: ~/Videos.
         self.recording_dir: str = str(Path.home() / "Videos")
+        # Empty: enable only for a recordings/ folder beside knowledge/sops/.
+        # 'off' disables the local SOP service explicitly.
+        self.sop_project_dir: str = ""
+        self.sop_agy_executable: str = ""
+        self.sop_segment_seconds: int = 120
+        self.sop_agy_timeout: int = 1200
 
         # Audio (web viewer only; None = disabled)
         self.audio_device: str | None = None
@@ -99,6 +105,7 @@ _FILE_KEYS = {
     "web_password", "web_tls_cert", "web_tls_key",
     "webrtc_fps", "webrtc_bitrate",
     "recording_dir",
+    "sop_project_dir", "sop_agy_executable", "sop_segment_seconds", "sop_agy_timeout",
     "audio_device",
     "auto_audio", "target_name", "direct_enabled",
     "autocrop",
@@ -182,6 +189,10 @@ _ENV_MAP = {
     "SHKVM_WEBRTC_FPS": "webrtc_fps",
     "SHKVM_WEBRTC_BITRATE": "webrtc_bitrate",
     "SHKVM_RECORDING_DIR": "recording_dir",
+    "SHKVM_SOP_PROJECT_DIR": "sop_project_dir",
+    "SHKVM_SOP_AGY_EXECUTABLE": "sop_agy_executable",
+    "SHKVM_SOP_SEGMENT_SECONDS": "sop_segment_seconds",
+    "SHKVM_SOP_AGY_TIMEOUT": "sop_agy_timeout",
     "SHKVM_AUTOCROP": "autocrop",
     "SHKVM_DEBUG_KEYS": "debug_keys",
     "SHKVM_SHOW_CURSOR": "show_cursor",
@@ -240,6 +251,10 @@ def _apply_args(config: Config, args):
         "webrtc_fps": "webrtc_fps",
         "webrtc_bitrate": "webrtc_bitrate",
         "recording_dir": "recording_dir",
+        "sop_project_dir": "sop_project_dir",
+        "sop_agy_executable": "sop_agy_executable",
+        "sop_segment_seconds": "sop_segment_seconds",
+        "sop_agy_timeout": "sop_agy_timeout",
     }
     for arg_name, attr in arg_to_attr.items():
         value = getattr(args, arg_name, None)

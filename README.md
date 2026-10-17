@@ -733,6 +733,78 @@ c.type_text('Hello from Python!')
 "
 ```
 
+## Local recording and SOP library
+
+The Record menu keeps the audio source visible and folds devices, recording
+volumes and audio checks under **设备与音量**. **录像与 SOP** opens a separate
+local library at `/library`. It lists all indexed recordings, existing SOP
+documents, analysis drafts and published versions. File actions and logs live
+in Details. Videos support playback and seeking next to the SOP.
+
+The library enables automatically when `recording_dir` is a `recordings/` folder
+beside an existing `knowledge/sops/` directory. Alternatively set
+`--sop-project-dir DIR` / `SHKVM_SOP_PROJECT_DIR`; `off` disables it. It is served
+only to loopback requests with a loopback Host; its WebSocket also requires a
+same-origin browser Origin and the existing viewer password when configured.
+This separate socket never streams capture hardware or accepts HID input.
+
+After durable recording save, the result card offers **生成 SOP**, **稍后整理**,
+or **仅保留录像**. Choices and prompt delivery survive reload. Importing older
+recordings only indexes metadata; it never sends them to AI automatically.
+The business date defaults to the JST recording date parsed from the filename
+and can be edited independently of recording / conversion timestamps.
+
+Analysis uses the installed, authenticated `agy` CLI and FFmpeg/ffprobe. The
+worker processes one job at a time, makes bounded video segments with original
+timecodes when Arial/DejaVu Sans is available, and retains successful segment
+results for retry. Completed temporary clips are removed, originals remain.
+`view_file` reads are gated by an exact-file Antigravity hook; shell, browser,
+MCP, write and agent tools are denied. An independent successful read audit is
+required before adopting results. The CLI `finish` tool may return structured
+data. Permission waits, missing hooks/media evidence, malformed results,
+timeouts and missing dependencies produce a visible recoverable task state.
+No global agy settings or permission bypass flags are installed.
+
+Current analysis uses video picture sampling. Audio transcription is not
+verified; drafts explicitly say so, and estimated timepoints require review.
+Updating a SOP compares the previous text while keeping this version's step
+timepoints tied to the current recording. Historical versions preserve their
+own recordings. Multi-recording synthesis within one version is not enabled.
+
+The user edits the draft, provides environment, reviewer and a resolution for
+each uncertainty, then publishes. Publication creates immutable version text,
+the current SOP, and a small project `.agents/skills/` entry pinned to the
+reviewed version. Publication can resume after a partial filesystem failure.
+Withdrawing disables skill discovery without removing recordings or history.
+Actual target execution and its authorization remain separate from publication.
+
+Files under the selected project:
+
+- `knowledge/sops/<sop-id>/drafts/`: unreviewed text; exclude this from Git.
+- `knowledge/sops/<sop-id>/versions/vNNNN.md` and `sop.md`: reviewed versions.
+- `.agents/skills/targetpc2-<sop-id>/SKILL.md`: published skill entry.
+- `.local/sop-library/library.sqlite`: authoritative metadata, queue and events.
+- `.local/video-analysis/<job-id>/`: local evidence, prompts/results and logs.
+- `knowledge/recordings-index.md`: generated index; edit metadata through the UI.
+
+**备份台账** uses SQLite's online backup API and stores the backup locally under
+`.local/sop-library/backups/`. Keep normal backups of SOP/skill folders and
+videos as well. Missing files are flagged and references preserved; scanning
+does not relocate or delete recordings. File renames outside the library are
+detected as missing/new files, so retain original names to keep existing links.
+
+Configuration (also accepted as YAML keys without the `SHKVM_` prefix):
+
+| Environment | Default | Purpose |
+|---|---|---|
+| `SHKVM_SOP_PROJECT_DIR` | auto | Project root, or `off` |
+| `SHKVM_SOP_AGY_EXECUTABLE` | `agy` on PATH | Authenticated local CLI executable |
+| `SHKVM_SOP_SEGMENT_SECONDS` | 120 | Segment length, clamped to 15–300 seconds |
+| `SHKVM_SOP_AGY_TIMEOUT` | 1200 | Per-call limit, clamped to 30–7200 seconds |
+
+The same settings have lowercase `--sop-...` CLI flags. A changed CLI/analysis
+recipe is processed as a new analysis job; use **新建分析任务** in Details.
+
 ## Python Client Library
 
 ```python
@@ -763,7 +835,10 @@ jpeg_bytes, width, height = client.capture_frame_jpeg()
 info = client.get_device_info()
 ```
 
-The client is thread-safe and auto-reconnects on connection loss.
+The client is thread-safe. On connection loss it retries read-only requests
+(`ping`, `capture_frame`, `get_device_info`, `list_capture_devices`, `get_timing`)
+once. Input requests are never replayed: a missing response may mean partial or
+completed HID delivery. Observe the screen before deciding how to recover.
 
 ## License
 

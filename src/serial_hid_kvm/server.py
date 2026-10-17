@@ -522,6 +522,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recording-dir", type=str, metavar="DIR",
                         help="Directory for browser screen recordings"
                              " (default: ~/Videos)")
+    parser.add_argument("--sop-project-dir", type=str, metavar="DIR",
+                        help="Local SOP project root (auto beside knowledge/sops; 'off' disables)")
+    parser.add_argument("--sop-agy-executable", type=str, metavar="FILE",
+                        help="Antigravity agy executable (default: PATH)")
+    parser.add_argument("--sop-segment-seconds", type=int, metavar="SECONDS",
+                        help="Video analysis segment length (15-300, default: 120)")
+    parser.add_argument("--sop-agy-timeout", type=int, metavar="SECONDS",
+                        help="Maximum agy time per analysis segment (default: 1200)")
 
     # Keyboard
     parser.add_argument("--target-layout", type=str, metavar="NAME",

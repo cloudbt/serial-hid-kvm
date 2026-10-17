@@ -36,6 +36,8 @@ from ._web_recording_audio import RECORDING_AUDIO_CONTROLS_JS
 from ._recording import convert_recording
 from ._recording_session import RecordingSessions
 from ._recording_library import RecordingLibrary
+from ._sop_http import SopService, local_request
+from ._sop_viewer import install_sop_viewer
 from .hid_protocol import (
     build_keyboard_report,
     build_mouse_abs_packet,
@@ -1252,7 +1254,7 @@ function pumpRecordingUpload() {
     catch (e) { u.inflight = null; u.ready = false; }
   } else if (u.finishing && !u.finishSent) {
     u.finishSent = true;
-    ws.send(JSON.stringify({type:"rec_session_finish", session:u.id, next:u.next}));
+    ws.send(JSON.stringify({type:"rec_session_finish", session:u.id, next:u.next, metadata:u.metadata}));
   }
 }
 function recordingUploadEvent(msg) {
@@ -1486,6 +1488,7 @@ async function startRecordingSession() {
 }
 
 function stopRecording(forReconnect = false) {
+  if (recording && recUpload) recUpload.metadata = {recorded_end_at:new Date().toISOString(), duration_seconds:(Date.now()-recStartTime)/1000};
   if (!forReconnect) recResumePending = false;
   if (!recording) return;
   recording = false;
@@ -1539,6 +1542,7 @@ function captureDisplayStream() {
 }
 
 document.getElementById("btnRec").addEventListener("click", () => {
+  closeToolbarPanels();
   if (recResumePending) {
     recResumePending = false;
     document.getElementById("btnRec").textContent = "⏺ Record";
@@ -1898,6 +1902,7 @@ if (new URLSearchParams(location.search).has("rtc")) {
 # needless reload.
 _VIEWER_HTML = _VIEWER_HTML.replace("__RECORDING_AUDIO_MIXER__", RECORDING_AUDIO_MIXER_JS).replace(
     "__RECORDING_AUDIO_CONTROLS__", RECORDING_AUDIO_CONTROLS_JS)
+_VIEWER_HTML = install_sop_viewer(_VIEWER_HTML)
 
 _BUILD_ID = hashlib.md5(_VIEWER_HTML.encode("utf-8")).hexdigest()[:12]
 
@@ -1930,6 +1935,7 @@ class WebViewerServer:
         self._recording_sessions = RecordingSessions(config.recording_dir)
         self._recording_library = RecordingLibrary(config.recording_dir)
         self._session_exports: dict = {}
+        self._sop = SopService(self)
         # Number of clients currently consuming the server JPEG stream.  The
         # capture device is only held while this is > 0, so a client switching
         # to "direct" (native getUserMedia) video frees the device for the
@@ -1971,6 +1977,7 @@ class WebViewerServer:
             ping_timeout=90,   # Tolerate temporary busy/background browser work.
             max_size=8 * 1024 * 1024,
         )
+        await asyncio.to_thread(self._sop.start)
         scheme = "https" if ssl_ctx else "http"
         auth = " (password required)" if self._config.web_password else ""
         logger.info(f"Web viewer listening on {scheme}://{host}:{port}{auth}")
@@ -2000,6 +2007,7 @@ class WebViewerServer:
         return ctx
 
     async def stop(self):
+        await asyncio.to_thread(self._sop.stop)
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -2041,6 +2049,13 @@ class WebViewerServer:
 
     async def _process_http(self, connection, request):
         """Serve the HTML viewer and PWA assets for HTTP requests."""
+        route = urlsplit(request.path).path
+        if route == "/library":
+            return self._sop.page(connection, request)
+        if route == "/sop/ws":
+            if not self._sop.store or not local_request(connection, request, origin=True):
+                return Response(403, "Forbidden", websockets.Headers(), b"Local same-origin clients only")
+            return None
         if urlsplit(request.path).path == "/recordings/file":
             return await self._serve_recording(connection, request)
 
@@ -2138,6 +2153,9 @@ class WebViewerServer:
 
     async def _handle_client(self, ws):
         """Handle a single WebSocket client: stream frames + process input."""
+        if urlsplit(ws.request.path).path == "/sop/ws":
+            await self._sop.socket(ws)
+            return
         self._clients.add(ws)
         addr = ws.remote_address
         ip = f"{addr[0]}:{addr[1]}" if addr else "unknown"
@@ -2879,8 +2897,31 @@ class WebViewerServer:
 
                 if ev_type == "recordings_list":
                     items = await asyncio.to_thread(self._recording_library.items)
+                    local_sop = bool(self._sop.store and local_request(ws, ws.request, origin=True))
+                    sop_prompt = None
+                    try:
+                        if local_sop:
+                            await asyncio.to_thread(self._sop.store.sync)
+                            snapshot = await asyncio.to_thread(self._sop.store.snapshot)
+                            records = {r['id']: r for r in snapshot['recordings']}
+                            prompt = await asyncio.to_thread(self._sop.store.pending_prompt)
+                            if prompt:
+                                sop_prompt = prompt['id']
+                                # A pending saved card can outlive the recent-ten menu.
+                                if sop_prompt not in {i['id'] for i in items}:
+                                    all_items = await asyncio.to_thread(self._recording_library.items, None)
+                                    items += [i for i in all_items if i['id'] == sop_prompt]
+                            for item in items:
+                                record = records.get(item['id'])
+                                if record:
+                                    item.update(sop_choice=record['choice'],recorded_start_at=record['media'].get('recorded_start_at'))
+                    except Exception:
+                        local_sop = False
+                        sop_prompt = None
+                        logger.exception("SOP list enrichment deferred")
                     await ws.send(json.dumps({"type":"recordings_list", "items":items,
-                                              "local":self._local_recording_client(ws)}))
+                                              "local":self._local_recording_client(ws),
+                                              "sop_enabled":local_sop,"sop_prompt":sop_prompt}))
                     continue
 
                 if ev_type == "recordings_open":
@@ -2912,8 +2953,13 @@ class WebViewerServer:
                         if ev.get("session") != upload_session:
                             raise ValueError("Recording session is not attached")
                         source, destination = await asyncio.to_thread(self._recording_sessions.finish,
-                                                                     upload_session, ev.get("next"))
+                                                                     upload_session, ev.get("next"), ev.get("metadata"))
                         state["recording_session"] = False
+                        if self._sop.store:
+                            try:
+                                await asyncio.to_thread(self._sop.store.notice_saved, self._recording_library.identifier(destination.name))
+                            except Exception:
+                                logger.exception("SOP indexing deferred; recording was saved")
                         await ws.send(json.dumps({"type":"rec_session_saved", "session":upload_session,
                                                   "path":str(destination), "recording_id":self._recording_library.identifier(destination.name)}))
                         if destination.exists():
