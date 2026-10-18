@@ -530,6 +530,30 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Video analysis segment length (15-300, default: 120)")
     parser.add_argument("--sop-agy-timeout", type=int, metavar="SECONDS",
                         help="Maximum agy time per analysis segment (default: 1200)")
+    parser.add_argument("--ai-hub-url", type=str, metavar="URL",
+                        help="kvm-ai-hub base URL for captions/transcription"
+                             " (default: http://192.168.0.38:8765; key via"
+                             " SHKVM_AI_HUB_KEY)")
+    parser.add_argument("--captions-language", type=str, metavar="LANG",
+                        help="Live caption language (default: auto)")
+    parser.add_argument("--no-captions", action="store_true",
+                        help="Disable live captions in the web viewer")
+    parser.add_argument("--no-minutes", action="store_true",
+                        help="Disable meeting minutes after recordings")
+    parser.add_argument("--minutes-summarizer", type=str, metavar="NAME",
+                        help="Default minutes summarizer: agy, codex,"
+                             " mac-qwen or off (default: agy)")
+    parser.add_argument("--minutes-fallback-order", type=str, metavar="LIST",
+                        help="Summarizer fallback order (default: agy,codex,mac-qwen)")
+    parser.add_argument("--minutes-timeout", type=int, metavar="SECONDS",
+                        help="Maximum summarizer time per attempt (default: 1800)")
+    parser.add_argument("--mac-llm-url", type=str, metavar="URL",
+                        help="OpenAI-compatible Mac Qwen endpoint (default:"
+                             " http://192.168.0.38:8000/v1; key via SHKVM_MAC_LLM_KEY)")
+    parser.add_argument("--mac-llm-model", type=str, metavar="NAME",
+                        help="Mac Qwen model name (default: current)")
+    parser.add_argument("--codex-executable", type=str, metavar="FILE",
+                        help="codex CLI executable (default: PATH)")
 
     # Keyboard
     parser.add_argument("--target-layout", type=str, metavar="NAME",

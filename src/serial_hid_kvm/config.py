@@ -78,6 +78,26 @@ class Config:
         self.sop_segment_seconds: int = 120
         self.sop_agy_timeout: int = 1200
 
+        # LAN AI hub (kvm-ai-hub on the Mac mini): live captions over
+        # WebSocket and post-recording transcription jobs.  Keys are secrets:
+        # prefer SHKVM_AI_HUB_KEY / SHKVM_MAC_LLM_KEY (never a CLI flag).
+        self.ai_hub_url: str = "http://192.168.0.38:8765"
+        self.ai_hub_key: str | None = None
+        self.captions_enabled: bool = True
+        self.captions_language: str = "auto"
+        # Meeting minutes after a recording session finishes.  Summarizer:
+        # agy | codex | mac-qwen | off; on failure the next entries of
+        # minutes_fallback_order are tried (mac-qwen never falls back to a
+        # cloud CLI, so a sensitive meeting stays on the LAN).
+        self.minutes_enabled: bool = True
+        self.minutes_summarizer: str = "agy"
+        self.minutes_fallback_order: str = "agy,codex,mac-qwen"
+        self.minutes_timeout: int = 1800
+        self.mac_llm_url: str = "http://192.168.0.38:8000/v1"
+        self.mac_llm_key: str | None = None
+        self.mac_llm_model: str = "current"
+        self.codex_executable: str = ""
+
         # Audio (web viewer only; None = disabled)
         self.audio_device: str | None = None
         self.auto_audio: bool = True
@@ -106,6 +126,9 @@ _FILE_KEYS = {
     "webrtc_fps", "webrtc_bitrate",
     "recording_dir",
     "sop_project_dir", "sop_agy_executable", "sop_segment_seconds", "sop_agy_timeout",
+    "ai_hub_url", "ai_hub_key", "captions_enabled", "captions_language",
+    "minutes_enabled", "minutes_summarizer", "minutes_fallback_order", "minutes_timeout",
+    "mac_llm_url", "mac_llm_key", "mac_llm_model", "codex_executable",
     "audio_device",
     "auto_audio", "target_name", "direct_enabled",
     "autocrop",
@@ -193,6 +216,18 @@ _ENV_MAP = {
     "SHKVM_SOP_AGY_EXECUTABLE": "sop_agy_executable",
     "SHKVM_SOP_SEGMENT_SECONDS": "sop_segment_seconds",
     "SHKVM_SOP_AGY_TIMEOUT": "sop_agy_timeout",
+    "SHKVM_AI_HUB_URL": "ai_hub_url",
+    "SHKVM_AI_HUB_KEY": "ai_hub_key",
+    "SHKVM_CAPTIONS": "captions_enabled",
+    "SHKVM_CAPTIONS_LANGUAGE": "captions_language",
+    "SHKVM_MINUTES": "minutes_enabled",
+    "SHKVM_MINUTES_SUMMARIZER": "minutes_summarizer",
+    "SHKVM_MINUTES_FALLBACK_ORDER": "minutes_fallback_order",
+    "SHKVM_MINUTES_TIMEOUT": "minutes_timeout",
+    "SHKVM_MAC_LLM_URL": "mac_llm_url",
+    "SHKVM_MAC_LLM_KEY": "mac_llm_key",
+    "SHKVM_MAC_LLM_MODEL": "mac_llm_model",
+    "SHKVM_CODEX_EXECUTABLE": "codex_executable",
     "SHKVM_AUTOCROP": "autocrop",
     "SHKVM_DEBUG_KEYS": "debug_keys",
     "SHKVM_SHOW_CURSOR": "show_cursor",
@@ -255,6 +290,16 @@ def _apply_args(config: Config, args):
         "sop_agy_executable": "sop_agy_executable",
         "sop_segment_seconds": "sop_segment_seconds",
         "sop_agy_timeout": "sop_agy_timeout",
+        # Keys (ai_hub_key, mac_llm_key) deliberately have no CLI flag:
+        # argv is visible in the process list.
+        "ai_hub_url": "ai_hub_url",
+        "captions_language": "captions_language",
+        "minutes_summarizer": "minutes_summarizer",
+        "minutes_fallback_order": "minutes_fallback_order",
+        "minutes_timeout": "minutes_timeout",
+        "mac_llm_url": "mac_llm_url",
+        "mac_llm_model": "mac_llm_model",
+        "codex_executable": "codex_executable",
     }
     for arg_name, attr in arg_to_attr.items():
         value = getattr(args, arg_name, None)
@@ -282,6 +327,10 @@ def _apply_args(config: Config, args):
         config.auto_audio = False
     if getattr(args, "no_direct", False):
         config.direct_enabled = False
+    if getattr(args, "no_captions", False):
+        config.captions_enabled = False
+    if getattr(args, "no_minutes", False):
+        config.minutes_enabled = False
 
 
 # ---------------------------------------------------------------------------

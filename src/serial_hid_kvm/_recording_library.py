@@ -87,7 +87,11 @@ class RecordingLibrary:
             result.append(item)
         return result
 
-    def resolve_link(self, query):
+    MEDIA = ('.mp4', '.webm')
+    # Minutes/transcript side files, served as text beside the recordings.
+    TEXT = ('.md', '.srt', '.vtt')
+
+    def resolve_link(self, query, suffixes=MEDIA + TEXT):
         relative, expires, key = (query.get(name, [''])[0] for name in ('file', 'expires', 'key'))
         try:
             if int(expires) < time.time() or not hmac.compare_digest(key, self.sign(relative, expires)):
@@ -95,7 +99,7 @@ class RecordingLibrary:
         except (TypeError, ValueError) as exc:
             raise ValueError('Recording link expired or invalid; refresh the recordings list') from exc
         path = self.confined(self.root / relative)
-        if path.suffix.lower() not in ('.mp4', '.webm') or not path.is_file():
+        if path.suffix.lower() not in suffixes or not path.is_file():
             raise FileNotFoundError('Recording no longer exists')
         return path
 

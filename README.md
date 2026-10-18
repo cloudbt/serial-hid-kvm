@@ -331,6 +331,18 @@ All use the `SHKVM_` prefix:
 | `SHKVM_WEBRTC_BITRATE` | `16000000` | WebRTC (H264) target bitrate in bits/s |
 | `SHKVM_RECORDING_DIR` | `~/Videos` | Folder for browser screen recordings |
 | `SHKVM_AUDIO_DEVICE` | auto-detect | Audio input device index or name |
+| `SHKVM_AI_HUB_URL` | `http://192.168.0.38:8765` | kvm-ai-hub (LAN) for live captions and transcription |
+| `SHKVM_AI_HUB_KEY` | — | Bearer key for kvm-ai-hub (env/YAML only, no CLI flag) |
+| `SHKVM_CAPTIONS` | `true` | Enable the CC (live captions) button |
+| `SHKVM_CAPTIONS_LANGUAGE` | `auto` | Language hint for captions and transcription |
+| `SHKVM_MINUTES` | `true` | Generate meeting minutes after recordings |
+| `SHKVM_MINUTES_SUMMARIZER` | `agy` | Default summarizer: `agy`, `codex`, `mac-qwen`, `off` |
+| `SHKVM_MINUTES_FALLBACK_ORDER` | `agy,codex,mac-qwen` | Tried after the chosen one fails (`mac-qwen` never falls back) |
+| `SHKVM_MINUTES_TIMEOUT` | `1800` | Max seconds per summarizer attempt |
+| `SHKVM_MAC_LLM_URL` | `http://192.168.0.38:8000/v1` | OpenAI-compatible Mac Qwen endpoint |
+| `SHKVM_MAC_LLM_KEY` | — | Bearer key for the Mac Qwen endpoint (env/YAML only) |
+| `SHKVM_MAC_LLM_MODEL` | `current` | Mac Qwen model name |
+| `SHKVM_CODEX_EXECUTABLE` | PATH `codex` | codex CLI used for minutes |
 | `SHKVM_AUTO_AUDIO` | `true` | Automatically match HDMI audio; disable for identical devices |
 | `SHKVM_TARGET_NAME` | (empty) | Target label in the viewer and API ping |
 | `SHKVM_DIRECT_ENABLED` | `true` | Allow browser Direct mode |
@@ -387,6 +399,38 @@ autocrop: true
 debug_keys: false
 show_cursor: false
 ```
+
+## Live Captions and Meeting Minutes (web viewer)
+
+Both use **kvm-ai-hub**, a LAN service (Mac mini) that runs Qwen3-ASR.
+
+- **CC button** — live captions of the *Target HDMI* audio (the server's
+  `audio_device`, never the host mic). The server opens one hub connection
+  per process while at least one viewer has CC on and sends plain text, so WAN
+  viewers work too. The ▾ menu sets font size and opens a history panel
+  (copy / download .txt). While a recording is in progress the captions are
+  also written to `<recording>.live.vtt` (reference only). Without an audio
+  device the button shows "CC 不可用".
+- **Meeting minutes** — choose in the Record ▾ menu (`agy` default, `codex`,
+  `Mac Qwen`, `关闭`); the choice is saved with the recording session. After
+  the recording is finished the server extracts 16 kHz FLAC from the WebM,
+  transcribes it on the hub, then summarizes into a fixed JSON schema and
+  writes, beside the MP4: `<recording>.srt` and `<recording>.minutes.md`
+  (timestamps link into the video). Progress, links and Retry appear in the
+  recording list. Jobs live in `recording_dir/.minutes/<id>/` and resume after
+  a restart. Pick **Mac Qwen** or **关闭** for sensitive meetings: the audio
+  and transcript then never leave the LAN.
+
+Keys are secrets — set them as environment variables (or YAML), never on the
+command line:
+
+```powershell
+$env:SHKVM_AI_HUB_KEY = "<hub key>"
+$env:SHKVM_MAC_LLM_KEY = "<splash key>"   # only for Mac Qwen minutes
+```
+
+A mock hub for development lives in `tests/mock_ai_hub.py`
+(`python -m tests.mock_ai_hub --port 8765 --key devkey --caption-every 3`).
 
 ## Preview Window
 

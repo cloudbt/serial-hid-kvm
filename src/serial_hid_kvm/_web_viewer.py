@@ -31,6 +31,8 @@ import websockets
 from websockets.http11 import Response
 
 from ._audio import AudioCapture
+from ._captions import CaptionService
+from ._minutes import MinutesService
 from ._web_audio import RECORDING_AUDIO_MIXER_JS
 from ._web_recording_audio import RECORDING_AUDIO_CONTROLS_JS
 from ._recording import convert_recording
@@ -310,6 +312,31 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
 @media(max-width:850px){#targetName{display:none}.status-group>summary{max-width:160px}.record-panel{position:fixed;left:auto;right:8px;top:46px}}
 @media(max-width:600px){#toolbar{padding:6px;gap:3px}.status-group{display:none}.tool-divider{margin:0 1px}.tool-group>summary[data-compact]{font-size:0;padding:3px 7px}.tool-group>summary[data-compact]::after{content:attr(data-compact);font-size:16px}#toolbar #btnFs{font-size:0;padding:3px 8px}#btnFs::after{content:"⛶";font-size:17px}#toolbar #btnAudio{font-size:0;padding:3px 7px}#btnAudio::after{content:"♫";font-size:16px}.tool-panel,.record-panel{position:fixed;top:46px;left:8px;right:8px;width:auto;max-width:400px}}
 @media(max-width:600px){body{display:flex;flex-direction:column}#toolbar{flex-wrap:wrap;height:auto;min-height:40px}#container{flex:1;min-height:0}.hdmi-monitor-name{display:none}.hdmi-monitor-controls,.hdmi-monitor-volume{gap:3px}#hdmiVolumePanel{position:fixed;top:82px;left:8px;right:auto}#recordingResult{top:auto;bottom:12px}}
+.cc-controls{display:flex;align-items:center;gap:1px;flex-shrink:0}
+.cc-controls>button{border-radius:5px 0 0 5px!important;min-width:38px}
+#ccMenu>summary{background:#0f3460;border:1px solid #1a1a5e;border-radius:0 5px 5px 0;padding:3px 7px}
+#btnCC.cc-offline{border-color:#e2a96d;color:#ffd3a0}
+.cc-panel{width:290px}
+#ccOverlay{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);width:max-content;max-width:min(92vw,1100px);z-index:15;pointer-events:none;display:flex;flex-direction:column;align-items:center;gap:4px;transition:opacity .5s}
+#ccOverlay.idle{opacity:0}
+#ccLines{display:flex;flex-direction:column;justify-content:flex-end;overflow:hidden;max-height:calc(2.9em + 8px);background:rgba(0,0,0,.74);color:#fff;font-size:var(--cc-size,24px);line-height:1.45;padding:4px 14px;border-radius:6px;text-align:center;text-shadow:0 1px 2px #000}
+#ccLines:empty{display:none}
+#ccLines .interim{opacity:.7}
+#ccNotice{font-size:12px;background:rgba(70,36,0,.88);color:#ffd3a0;padding:2px 10px;border-radius:5px}
+#ccNotice:empty{display:none}
+#ccHistory{position:fixed;top:50px;right:12px;bottom:12px;width:min(440px,calc(100vw - 24px));z-index:22;display:flex;flex-direction:column;background:#18263b;border:1px solid #45617d;border-radius:10px;box-shadow:0 10px 30px #0008;font-size:13px}
+#ccHistory[hidden]{display:none}
+#ccHistory header{display:flex;align-items:center;gap:6px;padding:10px 12px;border-bottom:1px solid #384b66}
+#ccHistory header strong{margin-right:auto;font-size:13px}
+#ccHistory header button{font:12px system-ui,sans-serif;color:#e0e9f7;background:#28466a;border:1px solid #45617d;border-radius:5px;padding:4px 8px;cursor:pointer}
+#ccHistoryList{flex:1;overflow:auto;padding:8px 12px;user-select:text;cursor:text;line-height:1.55}
+#ccHistoryList p{margin:0 0 6px}
+#ccHistoryList time{color:#8fa6c4;font-variant-numeric:tabular-nums;margin-right:8px;font-size:12px}
+.minutes-line{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12px;color:#b7c6dc;margin:6px 0 8px}
+.minutes-line a,.minutes-line button{font:12px system-ui,sans-serif;color:#e0e9f7;background:#28466a;border:1px solid #45617d;border-radius:5px;padding:3px 7px;text-decoration:none;cursor:pointer}
+.minutes-line .minutes-failed{color:#ffb48c;overflow-wrap:anywhere}
+#recentMinutes .recent-file strong{font-weight:500}
+@media(max-width:600px){#toolbar #btnCC{padding:3px 6px}#ccOverlay{bottom:12px}#ccHistory{top:auto;height:55vh}}
 </style>
 </head>
 <body>
@@ -347,6 +374,20 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
   </details>
   <span class="tool-divider"></span>
   <button id="btnAudio" title="Toggle audio playback" style="display:none">&#x1f507; Audio</button>
+  <div class="cc-controls">
+    <button id="btnCC" type="button" aria-pressed="false" title="Live captions" disabled>CC</button>
+    <details class="tool-group" id="ccMenu">
+      <summary title="Caption settings and history" aria-label="Caption settings and history">▾</summary>
+      <div class="tool-panel cc-panel"><h3>实时字幕</h3>
+        <p id="ccState" role="status">字幕关闭</p>
+        <label>字号 <select id="ccSize" aria-label="Caption font size">
+          <option value="16">16 px</option><option value="20">20 px</option><option value="24">24 px</option><option value="32">32 px</option><option value="40">40 px</option>
+        </select></label>
+        <div class="panel-row"><button id="btnCcHistory" type="button">历史</button><button id="btnCcCopy" type="button">复制</button><button id="btnCcDownload" type="button">下载 .txt</button></div>
+        <p>只识别 Target 的 HDMI 声音，由局域网内的 kvm-ai-hub 生成，仅供参考。录制时同时保存为 .live.vtt。</p>
+      </div>
+    </details>
+  </div>
   <div class="record-controls">
     <button id="btnRec" title="Start or stop recording">&#x23fa; Record</button>
     <details class="tool-group" id="recordMenu">
@@ -372,8 +413,13 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
         <div class="panel-row"><button id="btnRecInputs" title="Allow audio access and refresh devices">Inputs</button>
         <button id="btnRecCheck" title="Check audio without recording">Check audio</button></div>
         <p id="recAudioStatus" role="status"></p>
+        <label id="recMinutesRow">会议记录 <select id="recMinutes" aria-label="Meeting minutes summarizer" title="录制结束后自动转写并生成会议记录（录制开始时确定）。敏感会议请选 Mac Qwen 或关闭：内容不出局域网。">
+          <option value="agy">agy（默认）</option><option value="codex">codex</option><option value="mac-qwen">Mac Qwen（局域网内）</option><option value="off">关闭</option>
+        </select></label>
         <h3>Recent recordings <button id="refreshRecordings" title="Refresh recent recordings">↻</button></h3>
         <div id="recentRecordings" aria-live="polite">Connect to view recordings.</div>
+        <h3 id="minutesHeading" hidden>会议记录</h3>
+        <div id="recentMinutes" hidden></div>
         <p id="recordingActionStatus" role="status"></p>
       </div>
     </details>
@@ -396,9 +442,15 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
   <button id="closeRecordingResult" class="card-close" aria-label="Close recording result">×</button>
   <strong id="recordingResultTitle">Recording saved</strong>
   <div id="recordingResultName"></div><p id="recordingResultState"></p>
+  <div id="recordingResultMinutes" hidden></div>
   <div id="recordingResultActions" class="file-actions"></div>
 </aside>
 <div id="container" tabindex="0"><canvas id="screen"></canvas><video id="video" playsinline muted style="display:none"></video></div>
+<div id="ccOverlay" class="idle" aria-live="polite"><div id="ccNotice"></div><div id="ccLines"></div></div>
+<aside id="ccHistory" hidden aria-label="Caption history">
+  <header><strong>字幕历史</strong><button id="ccHistoryCopy" type="button">复制</button><button id="ccHistoryDownload" type="button">下载 .txt</button><button id="ccHistoryClose" type="button" aria-label="Close caption history">×</button></header>
+  <div id="ccHistoryList"><p>还没有字幕。</p></div>
+</aside>
 <div id="hint"></div>
 <div id="login"><form id="loginForm">
   <h1>serial-hid-kvm</h1>
@@ -542,6 +594,7 @@ function connect() {
   ws.onclose = (ev) => {
     const interrupted = recording || recFinishing;
     recordingConnectionLost();
+    if (ccOn) ccSetState("connecting", "");
     statusEl.textContent = recording
       ? "Picture disconnected — recording continues locally; upload will resume"
       : recFinishing ? "Disconnected — recording stopped; waiting to upload"
@@ -593,6 +646,8 @@ function connect() {
           applyCaptureStatus(msg.capture_status || null);
           updateResolutionStatus();
           adaptiveAck = !!msg.adaptive;
+          minutesConfigure(msg.minutes || null);
+          ccConfigure(msg.captions || null);
           if (msg.webrtc === false) {
             const b = document.getElementById("btnRtc");
             b.disabled = true;
@@ -640,6 +695,12 @@ function connect() {
         }
         else if (["rec_session_ready", "rec_ack", "rec_session_saved", "rec_session_error"].includes(msg.type)) {
           recordingUploadEvent(msg);
+        }
+        else if (msg.type === "caption") { ccCaption(msg); }
+        else if (msg.type === "captions_state") { ccSetState(msg.state, msg.detail || ""); }
+        else if (msg.type === "minutes_action") {
+          if (msg.error) showHint("会议记录：" + msg.error); else showHint(msg.message || "已加入会议记录队列");
+          refreshRecordingLibrary();
         }
         else if (msg.type === "recordings_list") { renderRecordingLibrary(msg); }
         else if (msg.type === "recordings_action") {
@@ -1179,8 +1240,9 @@ function recordingFileActions(item) {
 function renderRecordingLibrary(msg) {
   recentRecordingItems = msg.items; localRecordingActions = !!msg.local;
   clearTimeout(recordingLibraryTimer);
-  if (msg.items.some(item => item.state.includes("processing")))
+  if (msg.items.some(item => item.state.includes("processing") || minutesActive(item)))
     recordingLibraryTimer = setTimeout(refreshRecordingLibrary, 3000);
+  if (msg.minutes_enabled !== undefined) minutesEnabled = !!msg.minutes_enabled;
   const list = document.getElementById("recentRecordings"); list.replaceChildren();
   if (!msg.items.length) list.textContent = "No saved recordings yet.";
   for (const item of msg.items) {
@@ -1188,14 +1250,22 @@ function renderRecordingLibrary(msg) {
     const name = document.createElement("strong"); name.textContent = item.name; row.append(name);
     const info = document.createElement("small");
     info.textContent = new Date(item.modified * 1000).toLocaleString() + " · " + (item.size/1048576).toFixed(1) + " MB · " + item.state;
-    row.append(info, recordingFileActions(item)); list.append(row);
+    row.append(info);
+    const minutes = minutesLine(item);
+    if (minutes) row.append(minutes);
+    row.append(recordingFileActions(item)); list.append(row);
   }
+  renderMinutesList(msg);
   const item = msg.items.find(item => item.id === resultRecordingId);
   if (item) {
     const card = document.getElementById("recordingResult");
     const actions = document.getElementById("recordingResultActions");
     document.getElementById("recordingResultName").textContent = item.name;
     document.getElementById("recordingResultState").textContent = item.state;
+    const resultMinutes = document.getElementById("recordingResultMinutes");
+    const line = minutesLine(item);
+    resultMinutes.replaceChildren(...(line ? [line] : []));
+    resultMinutes.hidden = !line;
     actions.replaceChildren(recordingFileActions(item));
     if (resultRecordingPending) { card.hidden = false; resultRecordingPending = false; }
   }
@@ -1208,6 +1278,209 @@ function recordingFileSaved(msg) {
   refreshRecordingLibrary();
 }
 function recordingFileUpdated(msg) { refreshRecordingLibrary(); }
+
+// --- Meeting minutes (hub transcription + agy/codex/Mac Qwen summary) ---
+// The server queues minutes when a recording session finishes, using the
+// choice sent with rec_session_start. Status rides on recordings_list items.
+const recMinutesSelect = document.getElementById("recMinutes");
+const MINUTES_ACTIVE = ["queued", "extracting", "transcribing", "summarizing"];
+let minutesEnabled = false;
+function minutesConfigure(info) {
+  minutesEnabled = !!(info && info.enabled);
+  document.getElementById("recMinutesRow").hidden = !minutesEnabled;
+  recMinutesSelect.disabled = !minutesEnabled;
+  let saved = null;
+  try { saved = localStorage.getItem("kvmMinutes"); } catch (e) {}
+  const choice = saved || (info && info.default) || "agy";
+  if ([...recMinutesSelect.options].some(o => o.value === choice)) recMinutesSelect.value = choice;
+}
+recMinutesSelect.addEventListener("change", () => {
+  try { localStorage.setItem("kvmMinutes", recMinutesSelect.value); } catch (e) {}
+});
+function minutesActive(item) { return !!(item.minutes && MINUTES_ACTIVE.includes(item.minutes.state)); }
+function minutesLink(label, href) {
+  const a = document.createElement("a"); a.textContent = label; a.href = href;
+  a.target = "_blank"; a.rel = "noopener noreferrer"; return a;
+}
+function minutesLine(item) {
+  if (!minutesEnabled) return null;
+  const m = item.minutes;
+  const box = document.createElement("div"); box.className = "minutes-line";
+  const label = document.createElement("span");
+  if (!m) {
+    if (recMinutesSelect.value === "off") return null;
+    const make = document.createElement("button"); make.type = "button"; make.textContent = "生成会议记录";
+    make.title = "用 " + recMinutesSelect.selectedOptions[0].textContent + " 转写并总结这段录像";
+    make.addEventListener("click", () => wsSend({type:"minutes_retry", id:item.id, summarizer:recMinutesSelect.value}));
+    box.append(make);
+    return box;
+  }
+  label.textContent = "会议记录：" + m.label;
+  box.append(label);
+  if (m.state === "failed" && m.error) {
+    const why = document.createElement("span"); why.className = "minutes-failed";
+    why.textContent = m.error.length > 120 ? m.error.slice(0, 120) + "…" : m.error;
+    why.title = m.error; box.append(why);
+  }
+  const links = m.links || {};
+  if (links.minutes) box.append(minutesLink("会议记录", links.minutes));
+  if (links.minutes_md) box.append(minutesLink(".md", links.minutes_md + "&download=1"));
+  if (links.transcript) box.append(minutesLink("转写稿", links.transcript));
+  if (links.live_vtt) box.append(minutesLink("实时字幕", links.live_vtt));
+  if (m.state === "failed" || m.state === "done") {
+    const retry = document.createElement("button"); retry.type = "button";
+    retry.textContent = m.state === "failed" ? "重试" : "重新总结";
+    retry.title = m.state === "failed" ? "从失败的步骤继续" : "用当前选择的方式重新总结（沿用转写稿）";
+    retry.addEventListener("click", () => {
+      const choice = recMinutesSelect.value;
+      wsSend({type:"minutes_retry", id:item.id, summarizer: m.state === "done" && choice !== "off" ? choice : null});
+    });
+    box.append(retry);
+  }
+  return box;
+}
+function renderMinutesList(msg) {
+  // With the SOP library enabled the plain recordings list is hidden, so
+  // minutes get their own list; otherwise they appear inline per recording.
+  const heading = document.getElementById("minutesHeading");
+  const list = document.getElementById("recentMinutes");
+  const show = minutesEnabled && !!msg.sop_enabled;
+  heading.hidden = list.hidden = !show;
+  list.replaceChildren();
+  if (!show) return;
+  const items = msg.items.filter(item => item.minutes);
+  if (!items.length) { list.textContent = "暂无会议记录。"; return; }
+  for (const item of items) {
+    const row = document.createElement("div"); row.className = "recent-file";
+    const name = document.createElement("strong"); name.textContent = item.name;
+    row.append(name, minutesLine(item)); list.append(row);
+  }
+}
+
+// --- Live captions (Target HDMI audio -> kvm-ai-hub on the LAN) ---
+// The server owns the hub link (ref-counted across viewers) and sends plain
+// caption text, so this works for WAN viewers too. CC on/off is remembered.
+const ccBtn = document.getElementById("btnCC");
+const ccOverlay = document.getElementById("ccOverlay");
+const ccLines = document.getElementById("ccLines");
+const ccNotice = document.getElementById("ccNotice");
+const ccStateEl = document.getElementById("ccState");
+const ccHistoryPanel = document.getElementById("ccHistory");
+const ccHistoryList = document.getElementById("ccHistoryList");
+const ccSizeSelect = document.getElementById("ccSize");
+const CC_STATE_TEXT = {off:"字幕关闭", connecting:"正在连接 kvm-ai-hub…", live:"字幕识别中",
+  offline:"kvm-ai-hub 离线，正在重连", unavailable:"字幕不可用"};
+const ccHistory = [];
+const ccSeen = new Set();
+let ccRecent = [];
+let ccAvailable = false, ccState = "off", ccHideTimer = null;
+let ccOn = false;
+try { ccOn = localStorage.getItem("kvmCaptions") === "1"; } catch (e) {}
+try { ccSizeSelect.value = localStorage.getItem("kvmCaptionSize") || "24"; } catch (e) { ccSizeSelect.value = "24"; }
+if (!ccSizeSelect.value) ccSizeSelect.value = "24";
+ccOverlay.style.setProperty("--cc-size", ccSizeSelect.value + "px");
+ccSizeSelect.addEventListener("change", () => {
+  ccOverlay.style.setProperty("--cc-size", ccSizeSelect.value + "px");
+  try { localStorage.setItem("kvmCaptionSize", ccSizeSelect.value); } catch (e) {}
+  ccShowOverlay();
+});
+function ccRenderButton() {
+  ccBtn.setAttribute("aria-pressed", String(ccOn));
+  ccBtn.classList.toggle("active", ccOn && ccState === "live");
+  ccBtn.classList.toggle("cc-offline", ccOn && (ccState === "offline" || ccState === "connecting"));
+}
+function ccConfigure(info) {
+  ccAvailable = !!(info && info.available);
+  ccBtn.disabled = !ccAvailable;
+  ccBtn.textContent = ccAvailable ? "CC" : "CC 不可用";
+  ccBtn.title = ccAvailable ? "实时字幕（Target HDMI 声音 → kvm-ai-hub）"
+    : "字幕不可用：" + ((info && info.reason) || "服务端未提供");
+  if (!ccAvailable) { ccSetState("unavailable", (info && info.reason) || ""); return; }
+  if (ccOn) { ccSetState("connecting", ""); wsSend({type:"captions", on:true}); }
+  else ccSetState("off", "");
+}
+function ccSetState(state, detail) {
+  ccState = state;
+  ccStateEl.textContent = (CC_STATE_TEXT[state] || state) + (detail ? "：" + detail : "");
+  let notice = "";
+  if (ccOn && state === "offline") notice = "字幕：kvm-ai-hub 离线，正在重连…" + (detail ? "（" + detail + "）" : "");
+  else if (ccOn && state === "unavailable") notice = "字幕不可用" + (detail ? "：" + detail : "");
+  ccNotice.textContent = notice;
+  if (state === "unavailable") ccOn = false;
+  ccRenderButton();
+  if (notice) ccShowOverlay(); else if (!ccLines.childElementCount) ccOverlay.classList.add("idle");
+}
+function ccToggle(on) {
+  ccOn = on;
+  try { localStorage.setItem("kvmCaptions", on ? "1" : "0"); } catch (e) {}
+  wsSend({type:"captions", on});
+  if (!on) { ccRecent = []; ccLines.replaceChildren(); ccOverlay.classList.add("idle"); }
+  ccSetState(on ? "connecting" : "off", "");
+}
+ccBtn.addEventListener("click", () => { if (ccAvailable) ccToggle(!ccOn); container.focus(); });
+function ccShowOverlay() {
+  ccOverlay.classList.remove("idle");
+  clearTimeout(ccHideTimer);
+  ccHideTimer = setTimeout(() => { if (!ccNotice.textContent) ccOverlay.classList.add("idle"); }, 10000);
+}
+function ccClock(ms) {
+  const d = new Date(ms);
+  return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, "0")).join(":");
+}
+function ccAppendHistory(entry) {
+  if (ccHistory.length === 1) ccHistoryList.replaceChildren();
+  const p = document.createElement("p");
+  const t = document.createElement("time"); t.textContent = ccClock(entry.at);
+  p.append(t, document.createTextNode(entry.text));
+  const stick = ccHistoryList.scrollTop + ccHistoryList.clientHeight >= ccHistoryList.scrollHeight - 30;
+  ccHistoryList.append(p);
+  while (ccHistoryList.childElementCount > 2000) ccHistoryList.firstElementChild.remove();
+  if (stick) ccHistoryList.scrollTop = ccHistoryList.scrollHeight;
+}
+function ccCaption(msg) {
+  if (!ccOn || typeof msg.text !== "string") return;
+  if (msg.final !== false) {
+    const key = msg.at + "|" + msg.text;
+    if (ccSeen.has(key)) return;
+    ccSeen.add(key);
+    const entry = {at: msg.at || Date.now(), text: msg.text};
+    ccHistory.push(entry);
+    if (ccHistory.length > 5000) ccHistory.shift();
+    ccAppendHistory(entry);
+  }
+  if (msg.replay) return;
+  if (ccRecent.length && !ccRecent[ccRecent.length - 1].final) ccRecent.pop();
+  ccRecent.push({text: msg.text, final: msg.final !== false});
+  ccRecent = ccRecent.slice(-3);
+  ccLines.replaceChildren(...ccRecent.map(line => {
+    const div = document.createElement("div"); div.textContent = line.text;
+    if (!line.final) div.className = "interim";
+    return div;
+  }));
+  ccShowOverlay();
+}
+function ccHistoryText() { return ccHistory.map(h => ccClock(h.at) + "  " + h.text).join("\n") + "\n"; }
+async function ccCopy() {
+  if (!ccHistory.length) { showHint("还没有字幕"); return; }
+  try { await navigator.clipboard.writeText(ccHistoryText()); showHint("已复制 " + ccHistory.length + " 行字幕"); }
+  catch (e) { showHint("复制失败：" + e.message); }
+}
+function ccDownload() {
+  if (!ccHistory.length) { showHint("还没有字幕"); return; }
+  const stamp = new Date(Date.now() + 9*3600*1000).toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([ccHistoryText()], {type: "text/plain;charset=utf-8"}));
+  a.download = "captions-" + stamp + "-JST.txt";
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+document.getElementById("btnCcHistory").addEventListener("click", () => {
+  closeToolbarPanels(); ccHistoryPanel.hidden = !ccHistoryPanel.hidden;
+  if (!ccHistoryPanel.hidden) ccHistoryList.scrollTop = ccHistoryList.scrollHeight;
+});
+document.getElementById("ccHistoryClose").addEventListener("click", () => { ccHistoryPanel.hidden = true; container.focus(); });
+for (const id of ["btnCcCopy", "ccHistoryCopy"]) document.getElementById(id).addEventListener("click", ccCopy);
+for (const id of ["btnCcDownload", "ccHistoryDownload"]) document.getElementById(id).addEventListener("click", ccDownload);
 
 __RECORDING_AUDIO_MIXER__
 
@@ -1237,7 +1510,8 @@ function attachRecordingUpload() {
   recUpload.ready = false;
   recUpload.inflight = null;
   recUpload.finishSent = false;
-  ws.send(JSON.stringify({type:"rec_session_start", session:recUpload.id, filename:recUpload.filename}));
+  ws.send(JSON.stringify({type:"rec_session_start", session:recUpload.id, filename:recUpload.filename,
+    minutes:recUpload.minutes}));
 }
 function pumpRecordingUpload() {
   const u = recUpload;
@@ -1410,7 +1684,11 @@ async function startRecordingSession() {
   const mimeType = pickMimeType();
   const filename = recordingFilename();
   mediaRecorder = new MediaRecorder(recStream, mimeType ? {mimeType} : undefined);
+  // The minutes choice is fixed when recording starts and stored server-side
+  // with the session, so a later dropdown change only affects the next one.
+  const minutesSelect = document.getElementById("recMinutes");
   recUpload = {id:crypto.randomUUID().replace(/-/g,""), filename,
+    minutes:minutesSelect && !minutesSelect.disabled ? minutesSelect.value : "off",
     queue:[], next:0, ack:0, bytes:0, ready:false, inflight:null, finishing:false, finishSent:false};
   attachRecordingUpload();
 
@@ -1936,6 +2214,10 @@ class WebViewerServer:
         self._recording_library = RecordingLibrary(config.recording_dir)
         self._session_exports: dict = {}
         self._sop = SopService(self)
+        self._captions = CaptionService(
+            audio, getattr(config, "ai_hub_url", ""), getattr(config, "ai_hub_key", None),
+            getattr(config, "captions_language", "auto"), getattr(config, "captions_enabled", True))
+        self._minutes = MinutesService(config, self._recording_library)
         # Number of clients currently consuming the server JPEG stream.  The
         # capture device is only held while this is > 0, so a client switching
         # to "direct" (native getUserMedia) video frees the device for the
@@ -1978,6 +2260,7 @@ class WebViewerServer:
             max_size=8 * 1024 * 1024,
         )
         await asyncio.to_thread(self._sop.start)
+        await asyncio.to_thread(self._minutes.start)
         scheme = "https" if ssl_ctx else "http"
         auth = " (password required)" if self._config.web_password else ""
         logger.info(f"Web viewer listening on {scheme}://{host}:{port}{auth}")
@@ -2008,6 +2291,8 @@ class WebViewerServer:
 
     async def stop(self):
         await asyncio.to_thread(self._sop.stop)
+        await asyncio.to_thread(self._minutes.stop)
+        await self._captions.close()
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -2058,6 +2343,8 @@ class WebViewerServer:
             return None
         if urlsplit(request.path).path == "/recordings/file":
             return await self._serve_recording(connection, request)
+        if route == "/recordings/minutes":
+            return await self._serve_minutes(request)
 
         if request.path == "/ws":
             # Stash User-Agent for logging when _handle_client runs
@@ -2095,7 +2382,8 @@ class WebViewerServer:
             query = parse_qs(urlsplit(request.path).query)
             path = self._recording_library.resolve_link(query)
             size = path.stat().st_size
-            headers = {"Content-Type": "video/mp4" if path.suffix == ".mp4" else "video/webm",
+            kind = {".mp4": "video/mp4", ".webm": "video/webm"}.get(path.suffix.lower(), "text/plain; charset=utf-8")
+            headers = {"Content-Type": kind,
                        "Accept-Ranges": "bytes", "Cache-Control": "private, no-store",
                        "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
             disposition = "attachment" if query.get("download") == ["1"] else "inline"
@@ -2129,6 +2417,74 @@ class WebViewerServer:
             return Response(416, "Range Not Satisfiable", websockets.Headers({"Content-Range": f"bytes */{size}"}), b"")
         except (OSError, ValueError):
             return Response(404, "Not Found", websockets.Headers({"Content-Type":"text/plain", "Cache-Control":"no-store"}), b"Recording unavailable; refresh the recordings list.")
+
+    async def _serve_minutes(self, request):
+        """HTML minutes view for a signed ``<recording>.minutes.md`` link."""
+        try:
+            query = parse_qs(urlsplit(request.path).query)
+            path = self._recording_library.resolve_link(query, suffixes=(".md",))
+            nonce = secrets.token_urlsafe(16)
+            body = (await asyncio.to_thread(self._minutes.page, path, nonce)).encode("utf-8")
+            return Response(200, "OK", websockets.Headers({
+                "Content-Type": "text/html; charset=utf-8", "Content-Length": str(len(body)),
+                "Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": f"default-src 'none'; script-src 'nonce-{nonce}'; "
+                                           "style-src 'unsafe-inline'; media-src 'self'; frame-ancestors 'none'; "
+                                           "base-uri 'none'; form-action 'none'"}), body)
+        except (OSError, ValueError, KeyError, TypeError):
+            return Response(404, "Not Found", websockets.Headers({"Content-Type": "text/plain", "Cache-Control": "no-store"}),
+                            b"Minutes unavailable; refresh the recordings list.")
+
+    def _queue_minutes(self, session, source, destination):
+        """Blocking: enqueue minutes with the choice stored at recording start."""
+        manifest = json.loads(Path(source).with_name("session.json").read_text(encoding="utf-8"))
+        return self._minutes.enqueue(self._recording_library.identifier(destination.name), source,
+                                     destination.stem, manifest.get("minutes"), session)
+
+    def _retry_minutes(self, key, summarizer=None):
+        """Blocking: retry a failed job, or create one for an older recording."""
+        if self._minutes.load(key) is not None:
+            return self._minutes.retry(key, summarizer)
+        entry = self._recording_library.catalog().get(key)
+        if entry is None:
+            raise ValueError("Recording no longer exists")
+        return self._minutes.retry(key, summarizer, source=entry["path"], output_stem=Path(entry["name"]).stem)
+
+    def _minutes_views(self, items):
+        return {item["id"]: self._minutes.view(item["id"]) for item in items}
+
+    def _set_captions(self, state: dict, on: bool):
+        """Join/leave the shared caption feed (the hub link is ref-counted)."""
+        if on and state["captions_queue"] is None:
+            state["captions_queue"] = self._captions.subscribe()
+            state["captions_event"].set()
+        elif not on and state["captions_queue"] is not None:
+            q = state["captions_queue"]
+            state["captions_queue"] = None
+            state["captions_event"].clear()
+            self._captions.unsubscribe(q)
+            try:
+                if q.full():
+                    q.get_nowait()
+                q.put_nowait(None)  # wake _send_captions off the old queue
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+
+    async def _send_captions(self, ws, state: dict):
+        """Forward caption text / hub state to this client while CC is on."""
+        while True:
+            q = state["captions_queue"]
+            if q is None:
+                await state["captions_event"].wait()
+                continue
+            msg = await q.get()
+            if msg is None or state["captions_queue"] is not q:
+                continue
+            try:
+                await ws.send(json.dumps(msg, ensure_ascii=False))
+            except websockets.ConnectionClosed:
+                break
 
     @staticmethod
     def _local_recording_client(ws):
@@ -2190,7 +2546,8 @@ class WebViewerServer:
                  "webrtc": False, "rtc_session": None,
                  "wan": wan,
                  "inflight": 0, "ack_event": asyncio.Event(),
-                 "audio_queue": None, "audio_event": asyncio.Event()}
+                 "audio_queue": None, "audio_event": asyncio.Event(),
+                 "captions_queue": None, "captions_event": asyncio.Event()}
 
         loop = asyncio.get_running_loop()
         try:
@@ -2218,6 +2575,10 @@ class WebViewerServer:
                 "capture_request": {"width": self._config.capture_width,
                                     "height": self._config.capture_height},
                 "capture_status": self._hw.get_capture().get_cached_info(),
+                "captions": {"available": self._captions.available,
+                             "reason": self._captions.reason},
+                "minutes": {"enabled": self._minutes.enabled,
+                            "default": self._minutes.default},
             }))
 
             # Tell the client which capture device the server uses, so direct
@@ -2248,6 +2609,7 @@ class WebViewerServer:
                 asyncio.create_task(self._send_capture_status(ws)),
                 asyncio.create_task(self._send_frames(ws, state)),
                 asyncio.create_task(self._recv_input(ws, state)),
+                asyncio.create_task(self._send_captions(ws, state)),
             ]
             if self._audio is not None:
                 tasks.append(asyncio.create_task(
@@ -2271,6 +2633,7 @@ class WebViewerServer:
                         logger.warning("Viewer task ended: %s", error)
         finally:
             self._set_audio(state, False)
+            self._set_captions(state, False)
             self._clients.discard(ws)
             await self._stop_webrtc(state)
             await self._release_stream(state)
@@ -2919,9 +3282,18 @@ class WebViewerServer:
                         local_sop = False
                         sop_prompt = None
                         logger.exception("SOP list enrichment deferred")
+                    minutes = {}
+                    if self._minutes.enabled:
+                        try:
+                            minutes = await asyncio.to_thread(self._minutes_views, items)
+                        except Exception:
+                            logger.exception("Minutes status unavailable")
+                    for item in items:
+                        item["minutes"] = minutes.get(item["id"])
                     await ws.send(json.dumps({"type":"recordings_list", "items":items,
                                               "local":self._local_recording_client(ws),
-                                              "sop_enabled":local_sop,"sop_prompt":sop_prompt}))
+                                              "sop_enabled":local_sop,"sop_prompt":sop_prompt,
+                                              "minutes_enabled":self._minutes.enabled}))
                     continue
 
                 if ev_type == "recordings_open":
@@ -2935,12 +3307,37 @@ class WebViewerServer:
                     await ws.send(json.dumps(result))
                     continue
 
+                if ev_type == "captions":
+                    try:
+                        self._set_captions(state, bool(ev.get("on")))
+                        if not ev.get("on"):
+                            await ws.send(json.dumps({"type":"captions_state", "state":"off", "detail":""}))
+                    except ValueError as exc:
+                        await ws.send(json.dumps({"type":"captions_state", "state":"unavailable", "detail":str(exc)}))
+                    continue
+
+                if ev_type == "minutes_retry":
+                    try:
+                        summarizer = ev.get("summarizer") or None
+                        await asyncio.to_thread(self._retry_minutes, ev.get("id"), summarizer)
+                        result = {"type":"minutes_action", "id":ev.get("id"), "message":"已加入会议记录队列"}
+                    except (OSError, ValueError, KeyError, TypeError) as exc:
+                        result = {"type":"minutes_action", "id":ev.get("id"), "error":str(exc)}
+                    await ws.send(json.dumps(result, ensure_ascii=False))
+                    continue
+
                 if ev_type == "rec_session_start":
                     try:
                         result = await asyncio.to_thread(self._recording_sessions.attach,
-                                                        ev.get("session"), ev.get("filename"))
+                                                        ev.get("session"), ev.get("filename"),
+                                                        {"minutes": ev.get("minutes")})
                         upload_session = ev["session"]
                         state["recording_session"] = not result["finished"]
+                        if not result["finished"] and result.get("started_epoch"):
+                            self._captions.begin_recording(
+                                upload_session,
+                                self._recording_library.root / (Path(result["filename"]).stem + ".live.vtt"),
+                                result["started_epoch"])
                         logger.info("Recording session attached: %s next=%s", upload_session, result["next"])
                         await ws.send(json.dumps({"type":"rec_session_ready", "session":upload_session,
                                                   "next":result["next"], "finished":result["finished"]}))
@@ -2955,6 +3352,11 @@ class WebViewerServer:
                         source, destination = await asyncio.to_thread(self._recording_sessions.finish,
                                                                      upload_session, ev.get("next"), ev.get("metadata"))
                         state["recording_session"] = False
+                        self._captions.end_recording(upload_session)
+                        try:
+                            await asyncio.to_thread(self._queue_minutes, upload_session, source, destination)
+                        except Exception:
+                            logger.exception("Minutes queueing failed; recording was saved")
                         if self._sop.store:
                             try:
                                 await asyncio.to_thread(self._sop.store.notice_saved, self._recording_library.identifier(destination.name))

@@ -101,3 +101,22 @@ Run the `py_compile` + `node --check` block from SKILL.md. Restart server, reloa
 ### Audio
 - Server `AudioCapture` → `_send_audio` (binary `0x02`). Client AudioWorklet;
   playback muted via a `GainNode` (NOT `ctx.suspend`) so recording keeps audio.
+
+### Live captions (`CC` button) and meeting minutes
+- Client: `ccConfigure` (from `hello.captions`), `ccToggle` → `captions {on}`
+  (remembered in localStorage, re-sent on every `hello`), `ccCaption` keeps the
+  last 3 entries in `#ccLines` (CSS clips to 2 lines from the top), history in
+  `#ccHistory` (copy / .txt). Minutes: `#recMinutes` select (localStorage),
+  sent as `rec_session_start.minutes`; `minutesLine(item)` renders status,
+  links and Retry in the recording list / result card; `renderMinutesList`
+  shows a separate list when the SOP library hides the plain list.
+- Server: `CaptionService` (`_captions.py`), `MinutesService` (`_minutes.py`),
+  `_set_captions` / `_send_captions` per client, `_queue_minutes` at
+  `rec_session_finish`, `_serve_minutes` route.
+- Config: `ai_hub_url`, `ai_hub_key` (env only), `captions_enabled`,
+  `captions_language`, `minutes_enabled`, `minutes_summarizer`,
+  `minutes_fallback_order`, `minutes_timeout`, `mac_llm_url`, `mac_llm_key`
+  (env only), `mac_llm_model`, `codex_executable`; agy reuses
+  `sop_agy_executable`.
+- Tests: `tests/test_captions.py`, `tests/test_minutes.py`;
+  `tests/conftest.py` keeps every test off the real hub/LLM/`~/Videos`.
