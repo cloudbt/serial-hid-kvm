@@ -33,6 +33,7 @@ from websockets.http11 import Response
 from ._audio import AudioCapture
 from ._captions import CaptionService
 from ._minutes import MinutesService
+from ._live_meeting import LiveMeeting
 from ._web_audio import RECORDING_AUDIO_MIXER_JS
 from ._web_recording_audio import RECORDING_AUDIO_CONTROLS_JS
 from ._recording import convert_recording
@@ -324,19 +325,51 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
 #ccLines .interim{opacity:.7}
 #ccNotice{font-size:12px;background:rgba(70,36,0,.88);color:#ffd3a0;padding:2px 10px;border-radius:5px}
 #ccNotice:empty{display:none}
-#ccHistory{position:fixed;top:50px;right:12px;bottom:12px;width:min(440px,calc(100vw - 24px));z-index:22;display:flex;flex-direction:column;background:#18263b;border:1px solid #45617d;border-radius:10px;box-shadow:0 10px 30px #0008;font-size:13px}
-#ccHistory[hidden]{display:none}
-#ccHistory header{display:flex;align-items:center;gap:6px;padding:10px 12px;border-bottom:1px solid #384b66}
-#ccHistory header strong{margin-right:auto;font-size:13px}
-#ccHistory header button{font:12px system-ui,sans-serif;color:#e0e9f7;background:#28466a;border:1px solid #45617d;border-radius:5px;padding:4px 8px;cursor:pointer}
-#ccHistoryList{flex:1;overflow:auto;padding:8px 12px;user-select:text;cursor:text;line-height:1.55}
+:root{--side-w:0px;--tb-h:40px;--bar-h:0px}
+#container{width:calc(100% - var(--side-w));height:calc(100% - var(--tb-h) - var(--bar-h));align-items:flex-start;justify-content:flex-start}
+body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--bar-h))}
+#ccOverlay{left:calc((100vw - var(--side-w)) / 2);max-width:min(calc((100vw - var(--side-w)) * .92),1100px)}
+#recordingResult{right:calc(var(--side-w) + 12px)}
+#meetingBar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:calc(100% - var(--side-w));padding:5px 12px;background:#3a2c10;border-bottom:1px solid #8a6a2a;color:#ffe2a8;font-size:13px}
+#meetingBar[hidden]{display:none}
+#meetingBar button{font:12px system-ui,sans-serif;color:#fff;background:#8b2632;border:1px solid #d65c69;border-radius:5px;padding:3px 9px;cursor:pointer}
+#meetingBar button+button{background:transparent;border-color:#8a6a2a;color:#ffe2a8}
+#sidePanel{position:fixed;top:var(--tb-h);right:0;bottom:0;width:var(--side-w);z-index:9;display:flex;flex-direction:column;background:#141f31;border-left:1px solid #384b66;font-size:13px;min-width:0}
+#sidePanel[hidden]{display:none}
+#sideResize{position:absolute;left:-4px;top:0;bottom:0;width:8px;cursor:ew-resize;z-index:2;touch-action:none}
+#sideResize:hover,#sideResize.dragging{background:#5598ce55}
+.side-section{display:flex;flex-direction:column;min-height:0;flex:1 1 0;overflow:hidden}
+.side-section.folded{flex:0 0 auto!important}
+.side-section.folded>.side-body{display:none}
+.side-section header{display:flex;align-items:center;gap:6px;padding:7px 10px;border-bottom:1px solid #384b66;flex-wrap:wrap;background:#18263b}
+.side-section header strong{margin-right:auto;font-size:13px}
+.side-section button,.side-section select{font:12px system-ui,sans-serif;color:#e0e9f7;background:#28466a;border:1px solid #45617d;border-radius:5px;padding:3px 7px;cursor:pointer}
+.side-section .side-fold{background:transparent;border:0;padding:0 2px;font-size:13px;width:18px}
+.side-section.folded .side-fold{transform:rotate(-90deg)}
+.side-body{flex:1;overflow:auto;min-height:0}
+#sideSplit{flex:0 0 7px;cursor:ns-resize;background:#22324a;border-top:1px solid #384b66;border-bottom:1px solid #384b66;touch-action:none}
+#sideSplit:hover,#sideSplit.dragging{background:#2f5578}
+#sidePanel.split-off #sideSplit{display:none}
+#ccHistoryList{padding:8px 12px;user-select:text;cursor:text;line-height:1.55}
 #ccHistoryList p{margin:0 0 6px}
 #ccHistoryList time{color:#8fa6c4;font-variant-numeric:tabular-nums;margin-right:8px;font-size:12px}
+#livePoints .side-body{padding:8px 12px;user-select:text;line-height:1.55}
+.ls-actions{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px}
+#lsMeta{color:#8fa6c4;font-size:12px;margin:2px 0 8px}
+#lsMeta.failed{color:#ffb48c}
+#lsContent h4{font-size:12px;color:#b7c6dc;margin:10px 0 4px;font-weight:600}
+#lsContent ul{margin:0 0 4px 18px;padding:0}
+#lsContent li{margin:2px 0}
+#lsContent .ls-topic{font-size:14px;color:#fff}
+#lsContent .ls-new{background:rgba(255,200,97,.14);border-left:3px solid #ffc861;padding-left:5px;margin-left:-8px;list-style-position:inside}
+#lsContent .ls-new-list li{color:#ffe2a8}
+#btnCC{position:relative}
+#btnCC.has-badge::after{content:"";position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#ffb020;box-shadow:0 0 0 2px #16213e}
 .minutes-line{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12px;color:#b7c6dc;margin:6px 0 8px}
 .minutes-line a,.minutes-line button{font:12px system-ui,sans-serif;color:#e0e9f7;background:#28466a;border:1px solid #45617d;border-radius:5px;padding:3px 7px;text-decoration:none;cursor:pointer}
 .minutes-line .minutes-failed{color:#ffb48c;overflow-wrap:anywhere}
 #recentMinutes .recent-file strong{font-weight:500}
-@media(max-width:600px){#toolbar #btnCC{padding:3px 6px}#ccOverlay{bottom:12px}#ccHistory{top:auto;height:55vh}}
+@media(max-width:600px){#toolbar #btnCC{padding:3px 6px}#ccOverlay{bottom:12px}#sidePanel{top:auto;height:60vh;width:100%;border-left:0;border-top:1px solid #384b66;z-index:22}#sideResize{display:none}}
 </style>
 </head>
 <body>
@@ -357,6 +390,9 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
       </div>
       <label>Proportions <select id="displayAspect" aria-label="Display aspect ratio" title="Display proportion correction; does not change capture resolution">
         <option value="source">Source ratio</option><option value="3:2">Correct to 3:2</option>
+      </select></label>
+      <label>Size <select id="displayZoom" aria-label="Display size" title="KVM picture size; the 1:1 / Fit button toggles between Fit and the chosen size">
+        <option value="fit">Fit to available area</option><option value="0.5">50%</option><option value="0.67">67%</option><option value="0.75">75%</option><option value="0.9">90%</option><option value="1">100% (1:1)</option><option value="1.1">110%</option><option value="1.25">125%</option><option value="1.5">150%</option>
       </select></label>
     </div>
   </details>
@@ -383,7 +419,7 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
         <label>字号 <select id="ccSize" aria-label="Caption font size">
           <option value="16">16 px</option><option value="20">20 px</option><option value="24">24 px</option><option value="32">32 px</option><option value="40">40 px</option>
         </select></label>
-        <div class="panel-row"><button id="btnCcHistory" type="button">历史</button><button id="btnCcCopy" type="button">复制</button><button id="btnCcDownload" type="button">下载 .txt</button></div>
+        <div class="panel-row"><button id="btnCcHistory" type="button" title="右侧面板：字幕历史 + 会议要点">面板</button><button id="btnCcCopy" type="button">复制</button><button id="btnCcDownload" type="button">下载 .txt</button></div>
         <p>只识别 Target 的 HDMI 声音，由局域网内的 kvm-ai-hub 生成，仅供参考。录制时同时保存为 .live.vtt。</p>
       </div>
     </details>
@@ -420,6 +456,8 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
         <div id="recentRecordings" aria-live="polite">Connect to view recordings.</div>
         <h3 id="minutesHeading" hidden>会议记录</h3>
         <div id="recentMinutes" hidden></div>
+        <h3 id="notesHeading" hidden>会议记录（字幕生成·无录像）</h3>
+        <div id="meetingNotes" hidden></div>
         <p id="recordingActionStatus" role="status"></p>
       </div>
     </details>
@@ -445,11 +483,27 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
   <div id="recordingResultMinutes" hidden></div>
   <div id="recordingResultActions" class="file-actions"></div>
 </aside>
+<div id="meetingBar" hidden role="status"><span>检测到会议进行中，要开始录制吗？</span><button id="meetingBarRecord" type="button">开始录制</button><button id="meetingBarIgnore" type="button">本次忽略</button></div>
 <div id="container" tabindex="0"><canvas id="screen"></canvas><video id="video" playsinline muted style="display:none"></video></div>
 <div id="ccOverlay" class="idle" aria-live="polite"><div id="ccNotice"></div><div id="ccLines"></div></div>
-<aside id="ccHistory" hidden aria-label="Caption history">
-  <header><strong>字幕历史</strong><button id="ccHistoryCopy" type="button">复制</button><button id="ccHistoryDownload" type="button">下载 .txt</button><button id="ccHistoryClose" type="button" aria-label="Close caption history">×</button></header>
-  <div id="ccHistoryList"><p>还没有字幕。</p></div>
+<aside id="sidePanel" hidden aria-label="Captions and meeting points">
+  <div id="sideResize" role="separator" aria-orientation="vertical" aria-label="Resize panel" title="拖动调整面板宽度"></div>
+  <section id="ccHistory" class="side-section" aria-label="Caption history">
+    <header><button class="side-fold" type="button" data-section="ccHistory" aria-expanded="true" title="折叠/展开">▾</button><strong>字幕历史</strong><button id="ccHistoryCopy" type="button">复制</button><button id="ccHistoryDownload" type="button">下载 .txt</button><button id="ccHistoryClose" type="button" aria-label="Close side panel" title="关闭面板">×</button></header>
+    <div id="ccHistoryList" class="side-body"><p>还没有字幕。</p></div>
+  </section>
+  <div id="sideSplit" role="separator" aria-orientation="horizontal" aria-label="Resize sections" title="拖动调整上下比例"></div>
+  <section id="livePoints" class="side-section" aria-label="Meeting points">
+    <header><button class="side-fold" type="button" data-section="livePoints" aria-expanded="true" title="折叠/展开">▾</button><strong>会议要点</strong>
+      <select id="lsInterval" aria-label="Automatic summary interval" title="自动总结间隔（服务端设置，所有观看者共用）"><option value="0">自动：关闭</option><option value="3">每 3 分钟</option><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option></select>
+      <button id="lsRun" type="button" title="用「会议记录」里选择的方式立即总结">立即总结</button></header>
+    <div class="side-body">
+      <div class="ls-actions"><button id="lsNewMeeting" type="button" title="结束这次会议，下次字幕开始新的会议">新会议</button><button id="lsMinutes" type="button" title="用这次会议的字幕生成会议记录（只包含对方的声音）">生成会议记录</button><button id="lsCopy" type="button">复制</button><button id="lsExport" type="button">导出 .md</button></div>
+      <p id="lsMeta">打开 CC 后，这里会定期显示会议要点。</p>
+      <div id="lsMinutesLine"></div>
+      <div id="lsContent"></div>
+    </div>
+  </section>
 </aside>
 <div id="hint"></div>
 <div id="login"><form id="loginForm">
@@ -698,6 +752,7 @@ function connect() {
         }
         else if (msg.type === "caption") { ccCaption(msg); }
         else if (msg.type === "captions_state") { ccSetState(msg.state, msg.detail || ""); }
+        else if (msg.type === "live_summary") { onLiveSummary(msg); }
         else if (msg.type === "minutes_action") {
           if (msg.error) showHint("会议记录：" + msg.error); else showHint(msg.message || "已加入会议记录队列");
           refreshRecordingLibrary();
@@ -772,6 +827,7 @@ async function renderLoop() {
 
 // --- Display sizing (works for both the canvas and the direct <video>) ---
 let scaleMode = "native";  // "native" = 1:1 pixel (default), "fit" = fit to window
+let displayZoom = 1;       // size factor in "native" mode (Display > Size); 1 = 1:1
 let captureRequest = null;
 let captureStatus = null;
 let aspectManuallySelected = false;
@@ -838,19 +894,22 @@ function updateCanvasSize() {
   btn.setAttribute("aria-pressed", String(scaleMode === "fit"));
   if (!mw || !mh) return;
   const ar = displayAspect.value === "3:2" ? 3 / 2 : mw / mh;
-  btn.textContent = scaleMode === "fit" ? "Fit" :
+  btn.textContent = scaleMode === "fit" ? "Fit" : displayZoom !== 1 ? Math.round(displayZoom * 100) + "%" :
     (displayAspect.value === "source" ? "1:1" : "Width 1:1");
+  // The element box IS the rendered picture (canvas stretches, video uses
+  // object-fit: fill), so mouseCoords() stays exact for any size or position.
   if (scaleMode === "fit") {
     const cw = container.clientWidth;
     const ch = container.clientHeight;
+    if (!cw || !ch) return;
     let dw, dh;
     if (cw / ch > ar) { dh = ch; dw = ch * ar; }
     else { dw = cw; dh = cw / ar; }
     el.style.width = dw + "px";
     el.style.height = dh + "px";
   } else {
-    el.style.width = mw + "px";
-    el.style.height = (mw / ar) + "px";
+    el.style.width = (mw * displayZoom) + "px";
+    el.style.height = (mw / ar * displayZoom) + "px";
   }
 }
 window.addEventListener("resize", updateCanvasSize);
@@ -976,13 +1035,33 @@ function updateCursor() {
   container.style.cursor = showCursor ? "default" : "none";
   document.getElementById("btnCursor").classList.toggle("active", showCursor);
 }
-document.getElementById("btnScale").addEventListener("click", () => {
-  const btn = document.getElementById("btnScale");
-  if (scaleMode === "native") { scaleMode = "fit"; btn.textContent = "Fit"; }
-  else { scaleMode = "native"; btn.textContent = "1:1"; }
+// Display size: Fit, or a fixed factor of the source width (1 = 1:1). The
+// 1:1/Fit button toggles between Fit and the last fixed size. Remembered.
+const displayZoomSelect = document.getElementById("displayZoom");
+let lastFixedZoom = 1;
+function applyDisplaySize(value, remember) {
+  if (value === "fit") scaleMode = "fit";
+  else {
+    const zoom = parseFloat(value);
+    displayZoom = zoom > 0.2 && zoom <= 4 ? zoom : 1;
+    lastFixedZoom = displayZoom;
+    scaleMode = "native";
+  }
+  displayZoomSelect.value = scaleMode === "fit" ? "fit" : String(displayZoom);
+  if (remember) { try { localStorage.setItem("kvmDisplaySize", displayZoomSelect.value); } catch (e) {} }
   updateCanvasSize();
+}
+try {
+  const saved = localStorage.getItem("kvmDisplaySize");
+  if (saved && [...displayZoomSelect.options].some(o => o.value === saved)) applyDisplaySize(saved, false);
+} catch (e) {}
+displayZoomSelect.addEventListener("change", () => { applyDisplaySize(displayZoomSelect.value, true); container.focus(); });
+document.getElementById("btnScale").addEventListener("click", () => {
+  applyDisplaySize(scaleMode === "native" ? "fit" : String(lastFixedZoom), true);
   container.focus();
 });
+// Fit follows the available area: side panel, reminder bar, toolbar wrap.
+if (window.ResizeObserver) new ResizeObserver(() => updateCanvasSize()).observe(container);
 document.getElementById("btnAltTab").addEventListener("click", () => {
   send({type:"keydown", code:"AltLeft"});
   send({type:"keydown", code:"Tab"});
@@ -1240,7 +1319,8 @@ function recordingFileActions(item) {
 function renderRecordingLibrary(msg) {
   recentRecordingItems = msg.items; localRecordingActions = !!msg.local;
   clearTimeout(recordingLibraryTimer);
-  if (msg.items.some(item => item.state.includes("processing") || minutesActive(item)))
+  if (msg.items.some(item => item.state.includes("processing") || minutesActive(item)) ||
+      (msg.meeting_notes || []).some(minutesActive))
     recordingLibraryTimer = setTimeout(refreshRecordingLibrary, 3000);
   if (msg.minutes_enabled !== undefined) minutesEnabled = !!msg.minutes_enabled;
   const list = document.getElementById("recentRecordings"); list.replaceChildren();
@@ -1256,6 +1336,7 @@ function renderRecordingLibrary(msg) {
     row.append(recordingFileActions(item)); list.append(row);
   }
   renderMinutesList(msg);
+  renderMeetingNotes(msg);
   const item = msg.items.find(item => item.id === resultRecordingId);
   if (item) {
     const card = document.getElementById("recordingResult");
@@ -1357,6 +1438,25 @@ function renderMinutesList(msg) {
   }
 }
 
+function renderMeetingNotes(msg) {
+  // Minutes generated from live captions only (no recording); remote voice only.
+  const notes = msg.meeting_notes || [];
+  const heading = document.getElementById("notesHeading");
+  const list = document.getElementById("meetingNotes");
+  heading.hidden = list.hidden = !(minutesEnabled && notes.length);
+  list.replaceChildren();
+  for (const note of notes) {
+    const row = document.createElement("div"); row.className = "recent-file";
+    const name = document.createElement("strong");
+    name.textContent = note.started_at ? "会议 " + new Date(note.started_at * 1000).toLocaleString() : note.name;
+    const info = document.createElement("small"); info.textContent = "只包含对方（Target HDMI）的声音 · " + note.name;
+    row.append(name, info);
+    const line = minutesLine(note);
+    if (line) row.append(line);
+    list.append(row);
+  }
+}
+
 // --- Live captions (Target HDMI audio -> kvm-ai-hub on the LAN) ---
 // The server owns the hub link (ref-counted across viewers) and sends plain
 // caption text, so this works for WAN viewers too. CC on/off is remembered.
@@ -1365,7 +1465,6 @@ const ccOverlay = document.getElementById("ccOverlay");
 const ccLines = document.getElementById("ccLines");
 const ccNotice = document.getElementById("ccNotice");
 const ccStateEl = document.getElementById("ccState");
-const ccHistoryPanel = document.getElementById("ccHistory");
 const ccHistoryList = document.getElementById("ccHistoryList");
 const ccSizeSelect = document.getElementById("ccSize");
 const CC_STATE_TEXT = {off:"字幕关闭", connecting:"正在连接 kvm-ai-hub…", live:"字幕识别中",
@@ -1396,7 +1495,7 @@ function ccConfigure(info) {
   ccBtn.title = ccAvailable ? "实时字幕（Target HDMI 声音 → kvm-ai-hub）"
     : "字幕不可用：" + ((info && info.reason) || "服务端未提供");
   if (!ccAvailable) { ccSetState("unavailable", (info && info.reason) || ""); return; }
-  if (ccOn) { ccSetState("connecting", ""); wsSend({type:"captions", on:true}); }
+  if (ccOn) { ccSetState("connecting", ""); wsSend({type:"captions", on:true}); lsSync(); }
   else ccSetState("off", "");
 }
 function ccSetState(state, detail) {
@@ -1414,7 +1513,8 @@ function ccToggle(on) {
   ccOn = on;
   try { localStorage.setItem("kvmCaptions", on ? "1" : "0"); } catch (e) {}
   wsSend({type:"captions", on});
-  if (!on) { ccRecent = []; ccLines.replaceChildren(); ccOverlay.classList.add("idle"); }
+  if (on) lsSync();
+  if (!on) { ccRecent = []; ccLines.replaceChildren(); ccOverlay.classList.add("idle"); meetingCheck(); }
   ccSetState(on ? "connecting" : "off", "");
 }
 ccBtn.addEventListener("click", () => { if (ccAvailable) ccToggle(!ccOn); container.focus(); });
@@ -1439,7 +1539,9 @@ function ccAppendHistory(entry) {
 }
 function ccCaption(msg) {
   if (!ccOn || typeof msg.text !== "string") return;
-  if (msg.final !== false) {
+  const final = msg.final !== false;
+  if (final) {
+    // Only finals enter the history; interim results are overlay-only.
     const key = msg.at + "|" + msg.text;
     if (ccSeen.has(key)) return;
     ccSeen.add(key);
@@ -1447,17 +1549,30 @@ function ccCaption(msg) {
     ccHistory.push(entry);
     if (ccHistory.length > 5000) ccHistory.shift();
     ccAppendHistory(entry);
+    if (!msg.replay) meetingFinal();
   }
   if (msg.replay) return;
-  if (ccRecent.length && !ccRecent[ccRecent.length - 1].final) ccRecent.pop();
-  ccRecent.push({text: msg.text, final: msg.final !== false});
-  ccRecent = ccRecent.slice(-3);
-  ccLines.replaceChildren(...ccRecent.map(line => {
-    const div = document.createElement("div"); div.textContent = line.text;
-    if (!line.final) div.className = "interim";
-    return div;
-  }));
+  // Interim -> newer interim -> final of the same sentence (same seq) update
+  // one line in place, so ~0.7 s interim updates never rebuild the overlay.
+  const last = ccRecent[ccRecent.length - 1];
+  const sameSeq = last && msg.seq != null && last.seq === msg.seq;
+  if (last && (sameSeq || !last.final)) {
+    if (sameSeq && last.final && !final) return;  // late interim after its final
+    last.seq = msg.seq; last.final = final;
+    if (last.el.textContent !== msg.text) last.el.textContent = msg.text;
+    last.el.className = final ? "" : "interim";
+  } else {
+    const el = document.createElement("div"); el.textContent = msg.text;
+    if (!final) el.className = "interim";
+    ccLines.append(el);
+    ccRecent.push({seq: msg.seq, final, el});
+    while (ccRecent.length > 3) ccRecent.shift().el.remove();
+  }
   ccShowOverlay();
+}
+function ccResetHistory() {
+  ccHistory.length = 0; ccSeen.clear();
+  ccHistoryList.replaceChildren(Object.assign(document.createElement("p"), {textContent: "还没有字幕。"}));
 }
 function ccHistoryText() { return ccHistory.map(h => ccClock(h.at) + "  " + h.text).join("\n") + "\n"; }
 async function ccCopy() {
@@ -1474,13 +1589,237 @@ function ccDownload() {
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
 }
-document.getElementById("btnCcHistory").addEventListener("click", () => {
-  closeToolbarPanels(); ccHistoryPanel.hidden = !ccHistoryPanel.hidden;
-  if (!ccHistoryPanel.hidden) ccHistoryList.scrollTop = ccHistoryList.scrollHeight;
-});
-document.getElementById("ccHistoryClose").addEventListener("click", () => { ccHistoryPanel.hidden = true; container.focus(); });
 for (const id of ["btnCcCopy", "ccHistoryCopy"]) document.getElementById(id).addEventListener("click", ccCopy);
 for (const id of ["btnCcDownload", "ccHistoryDownload"]) document.getElementById(id).addEventListener("click", ccDownload);
+
+// --- Docked side panel: caption history (top) + meeting points (bottom) ---
+// Docked, not floating: #container loses the panel width (CSS --side-w), so
+// the KVM picture is never covered. Mouse mapping is unaffected because
+// mouseCoords() measures activeEl() itself at event time.
+const sidePanel = document.getElementById("sidePanel");
+const sideResize = document.getElementById("sideResize");
+const sideSplit = document.getElementById("sideSplit");
+const historySection = document.getElementById("ccHistory");
+const pointsSection = document.getElementById("livePoints");
+const meetingBar = document.getElementById("meetingBar");
+const rootStyle = document.documentElement.style;
+const narrowQuery = window.matchMedia("(max-width:600px)");
+function sideLoad(key, fallback) {
+  try { const v = localStorage.getItem(key); return v === null ? fallback : v; } catch (e) { return fallback; }
+}
+function sideStore(key, value) { try { localStorage.setItem(key, String(value)); } catch (e) {} }
+let sideWidth = parseInt(sideLoad("kvmSideWidth", "420"), 10) || 420;
+let sideRatio = parseFloat(sideLoad("kvmSideRatio", "0.5")) || 0.5;
+function clampSideWidth(w) { return Math.max(260, Math.min(Math.round(window.innerWidth * 0.7), w)); }
+function updateLayout() {
+  const open = !sidePanel.hidden;
+  rootStyle.setProperty("--side-w", open && !narrowQuery.matches ? clampSideWidth(sideWidth) + "px" : "0px");
+  const overlayToolbar = document.body.classList.contains("fs-autohide") || document.body.classList.contains("tb-hidden");
+  rootStyle.setProperty("--tb-h", overlayToolbar ? "0px" : toolbar.offsetHeight + "px");
+  rootStyle.setProperty("--bar-h", meetingBar.hidden ? "0px" : meetingBar.offsetHeight + "px");
+  updateCanvasSize();
+}
+window.addEventListener("resize", updateLayout);
+narrowQuery.addEventListener("change", updateLayout);
+document.addEventListener("fullscreenchange", () => requestAnimationFrame(updateLayout));
+new MutationObserver(updateLayout).observe(document.body, {attributes: true, attributeFilter: ["class"]});
+if (window.ResizeObserver) new ResizeObserver(updateLayout).observe(toolbar);
+function setSidePanel(open) {
+  sidePanel.hidden = !open;
+  sideStore("kvmSideOpen", open ? "1" : "0");
+  if (open) {
+    if (!pointsSection.classList.contains("folded")) ccBtn.classList.remove("has-badge");
+    ccHistoryList.scrollTop = ccHistoryList.scrollHeight;
+  }
+  updateLayout();
+}
+document.getElementById("btnCcHistory").addEventListener("click", () => { closeToolbarPanels(); setSidePanel(sidePanel.hidden); });
+document.getElementById("ccHistoryClose").addEventListener("click", () => { setSidePanel(false); container.focus(); });
+function dragHandle(handle, onMove, onDone) {
+  handle.addEventListener("pointerdown", e => {
+    e.preventDefault(); handle.setPointerCapture(e.pointerId); handle.classList.add("dragging");
+  });
+  handle.addEventListener("pointermove", e => { if (handle.hasPointerCapture(e.pointerId)) onMove(e); });
+  const end = e => {
+    if (!handle.classList.contains("dragging")) return;
+    handle.classList.remove("dragging"); onDone();
+  };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
+}
+dragHandle(sideResize, e => { sideWidth = clampSideWidth(window.innerWidth - e.clientX); updateLayout(); },
+  () => sideStore("kvmSideWidth", sideWidth));
+function applySplit() {
+  const folded = historySection.classList.contains("folded") || pointsSection.classList.contains("folded");
+  sidePanel.classList.toggle("split-off", folded);
+  historySection.style.flex = sideRatio + " 1 0";
+  pointsSection.style.flex = (1 - sideRatio) + " 1 0";
+}
+dragHandle(sideSplit, e => {
+  const r = sidePanel.getBoundingClientRect();
+  sideRatio = Math.max(0.12, Math.min(0.88, (e.clientY - r.top) / r.height)); applySplit();
+}, () => sideStore("kvmSideRatio", sideRatio.toFixed(3)));
+for (const fold of sidePanel.querySelectorAll(".side-fold")) {
+  const section = document.getElementById(fold.dataset.section);
+  const setFolded = folded => {
+    section.classList.toggle("folded", folded);
+    fold.setAttribute("aria-expanded", String(!folded));
+    sideStore("kvmSideFold:" + section.id, folded ? "1" : "0");
+    if (!folded && section === pointsSection && !sidePanel.hidden) ccBtn.classList.remove("has-badge");
+    applySplit();
+  };
+  fold.addEventListener("click", () => setFolded(!section.classList.contains("folded")));
+  setFolded(sideLoad("kvmSideFold:" + section.id, "0") === "1");
+}
+applySplit();
+setSidePanel(sideLoad("kvmSideOpen", "0") === "1");
+
+// --- Live meeting points (server summarizes final captions periodically) ---
+const lsInterval = document.getElementById("lsInterval");
+const lsRun = document.getElementById("lsRun");
+const lsMeta = document.getElementById("lsMeta");
+const lsContent = document.getElementById("lsContent");
+const lsMinutesLine = document.getElementById("lsMinutesLine");
+const LS_NAMES = {agy:"agy", codex:"codex", "mac-qwen":"Mac Qwen", none:"—"};
+let lsLast = null;
+function lsSummarizer() { return recMinutesSelect.value; }
+function lsSync() { if (ccOn) wsSend({type:"live_summary", action:"set_summarizer", summarizer:lsSummarizer()}); }
+recMinutesSelect.addEventListener("change", lsSync);
+lsInterval.addEventListener("change", () =>
+  wsSend({type:"live_summary", action:"set_interval", minutes:parseInt(lsInterval.value, 10), summarizer:lsSummarizer()}));
+lsRun.addEventListener("click", () => {
+  if (!ccOn) { showHint("请先打开 CC"); return; }
+  wsSend({type:"live_summary", action:"run", summarizer:lsSummarizer()});
+});
+document.getElementById("lsNewMeeting").addEventListener("click", () => {
+  if (!ccOn) { showHint("请先打开 CC"); return; }
+  if (!confirm("结束这次会议，从现在开始新的会议？（这次的字幕和要点会保存）")) return;
+  wsSend({type:"captions_new_meeting"});
+});
+document.getElementById("lsMinutes").addEventListener("click", () => {
+  if (!ccOn) { showHint("请先打开 CC"); return; }
+  if (recMinutesSelect.value === "off") { showHint("「会议记录」设置为关闭；请先在录制菜单里选择总结方式"); return; }
+  wsSend({type:"live_summary", action:"minutes", summarizer:lsSummarizer()});
+  showHint("已用这次会议的字幕排队生成会议记录（只包含对方的声音）");
+});
+function lsAgo(ms) {
+  const minutes = Math.floor((Date.now() - ms) / 60000);
+  return minutes < 1 ? "刚刚" : minutes + " 分钟前";
+}
+function lsMarkdown() {
+  const d = lsLast && lsLast.data;
+  if (!d) return "";
+  const list = items => (items.length ? items.map(x => "- " + x) : ["—"]).join("\n");
+  return "# 会议要点 · " + new Date(lsLast.at).toLocaleString() + "\n\n- 生成：" + (LS_NAMES[lsLast.used] || lsLast.used) +
+    " · 只包含对方（Target HDMI）的声音\n\n## 现在的话题\n\n" + (d.current_topic || "—") +
+    "\n\n## 要点\n\n" + list(d.points) + "\n\n## 决定\n\n" + list(d.decisions) +
+    "\n\n## TODO\n\n" + list(d.todos.map(t => t.task + "（" + (t.owner || "未定") + " / " + (t.due || "未定") + "）")) +
+    "\n\n## 未回答的问题\n\n" + list(d.open_questions) + "\n\n## 本次新增\n\n" + list(d.new_since_last) + "\n";
+}
+document.getElementById("lsCopy").addEventListener("click", async () => {
+  const md = lsMarkdown();
+  if (!md) { showHint("还没有要点"); return; }
+  try { await navigator.clipboard.writeText(md); showHint("已复制会议要点"); } catch (e) { showHint("复制失败：" + e.message); }
+});
+document.getElementById("lsExport").addEventListener("click", () => {
+  const md = lsMarkdown();
+  if (!md) { showHint("还没有要点"); return; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([md], {type: "text/markdown;charset=utf-8"}));
+  a.download = "meeting-points-" + new Date(Date.now() + 9*3600*1000).toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-") + "-JST.md";
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+});
+function lsRender() {
+  const m = lsLast;
+  if (!m) return;
+  lsMeta.classList.toggle("failed", m.state === "failed");
+  const finals = (m.session && m.session.finals) || 0;
+  let meta;
+  if (m.state === "running") meta = "正在总结…（" + (LS_NAMES[m.summarizer] || m.summarizer) + "）";
+  else if (m.state === "failed") meta = "总结失败：" + (m.error || "unknown");
+  else if (m.data && m.at) meta = lsAgo(m.at) + "更新 · " + (LS_NAMES[m.used] || m.used);
+  else meta = finals ? "已收到 " + finals + " 句字幕，尚未总结"
+    : ccOn ? "会议已开始，等待字幕…" : "打开 CC 后，这里会定期显示会议要点。";
+  if (m.summarizer === "off") meta += " · 「会议记录」为关闭，不自动总结";
+  lsMeta.textContent = meta;
+  lsRun.disabled = m.state === "running";
+  lsMinutesLine.replaceChildren(...(m.minutes ? [minutesLine({id: m.minutes.id, minutes: m.minutes})].filter(Boolean) : []));
+  const d = m.data;
+  if (!d) { lsContent.replaceChildren(); return; }
+  const prev = m.previous;
+  const fresh = new Set(d.new_since_last || []);
+  const known = key => new Set(prev ? (key === "todos" ? prev.todos.map(t => t.task) : prev[key]) : []);
+  const nodes = [];
+  const heading = text => Object.assign(document.createElement("h4"), {textContent: text});
+  nodes.push(heading("现在的话题"), Object.assign(document.createElement("div"), {className: "ls-topic", textContent: d.current_topic || "—"}));
+  for (const [title, key] of [["要点", "points"], ["决定", "decisions"], ["TODO", "todos"], ["未回答的问题", "open_questions"]]) {
+    const before = known(key);
+    const ul = document.createElement("ul");
+    for (const item of d[key]) {
+      const text = key === "todos" ? item.task + "（" + (item.owner || "负责人未定") + " / " + (item.due || "期限未定") + "）" : item;
+      const raw = key === "todos" ? item.task : item;
+      const li = Object.assign(document.createElement("li"), {textContent: text});
+      if ((prev && !before.has(raw)) || fresh.has(raw)) li.className = "ls-new";
+      ul.append(li);
+    }
+    if (!d[key].length) ul.append(Object.assign(document.createElement("li"), {textContent: "—"}));
+    nodes.push(heading(title), ul);
+  }
+  if (d.new_since_last.length) {
+    const ul = Object.assign(document.createElement("ul"), {className: "ls-new-list"});
+    for (const item of d.new_since_last) ul.append(Object.assign(document.createElement("li"), {textContent: item}));
+    nodes.push(heading("本次新增"), ul);
+  }
+  lsContent.replaceChildren(...nodes);
+}
+function onLiveSummary(msg) {
+  const oldSession = lsLast && lsLast.session && lsLast.session.id;
+  if (oldSession && msg.session && msg.session.id !== oldSession) {
+    ccResetHistory(); meetRunStart = 0; meetLastFinal = 0;
+  }
+  const isNew = !!(lsLast && msg.data && msg.at && msg.at !== lsLast.at);
+  lsLast = msg;
+  if (msg.notice) showHint("会议要点：" + msg.notice);
+  if (msg.interval !== undefined) lsInterval.value = String(msg.interval);
+  lsRender();
+  if (isNew && (sidePanel.hidden || pointsSection.classList.contains("folded"))) ccBtn.classList.add("has-badge");
+  meetingCheck();
+}
+setInterval(() => {
+  lsRender();
+  // Minutes from captions run in the background: refresh their status.
+  if (ccOn && lsLast && lsLast.minutes && MINUTES_ACTIVE.includes(lsLast.minutes.state)) wsSend({type:"live_summary", action:"sync"});
+}, 5000);
+
+// --- Forgot to record? Offer it once a meeting is clearly under way ---
+// CC live + finals for 2+ minutes (gaps < 60 s) + this browser not recording.
+let meetRunStart = 0, meetLastFinal = 0;
+function meetingFinal() {
+  const now = Date.now();
+  if (!meetRunStart || now - meetLastFinal > 60000) meetRunStart = now;
+  meetLastFinal = now;
+  meetingCheck();
+}
+function meetingSessionId() { return (lsLast && lsLast.session && lsLast.session.id) || "none"; }
+function meetingCheck() {
+  let ignored = null;
+  try { ignored = sessionStorage.getItem("kvmMeetingIgnored"); } catch (e) {}
+  const now = Date.now();
+  const busy = recording || recFinishing || recStarting;
+  const show = ccOn && ccState === "live" && !busy && meetRunStart > 0 &&
+    meetLastFinal - meetRunStart >= 120000 && now - meetLastFinal < 60000 && ignored !== meetingSessionId();
+  if (meetingBar.hidden === show) { meetingBar.hidden = !show; updateLayout(); }
+}
+setInterval(meetingCheck, 5000);
+document.getElementById("meetingBarRecord").addEventListener("click", () => {
+  meetingBar.hidden = true; updateLayout();
+  startRecording(); container.focus();
+});
+document.getElementById("meetingBarIgnore").addEventListener("click", () => {
+  try { sessionStorage.setItem("kvmMeetingIgnored", meetingSessionId()); } catch (e) {}
+  meetingBar.hidden = true; updateLayout(); container.focus();
+});
 
 __RECORDING_AUDIO_MIXER__
 
@@ -2218,6 +2557,10 @@ class WebViewerServer:
             audio, getattr(config, "ai_hub_url", ""), getattr(config, "ai_hub_key", None),
             getattr(config, "captions_language", "auto"), getattr(config, "captions_enabled", True))
         self._minutes = MinutesService(config, self._recording_library)
+        self._meeting = LiveMeeting(config.recording_dir, self._captions, self._minutes,
+                                    getattr(config, "captions_summary_interval", 5))
+        self._meeting_task = None
+        self._meeting_jobs: set = set()  # not awaited on stop (summaries can be long)
         # Number of clients currently consuming the server JPEG stream.  The
         # capture device is only held while this is > 0, so a client switching
         # to "direct" (native getUserMedia) video frees the device for the
@@ -2261,6 +2604,7 @@ class WebViewerServer:
         )
         await asyncio.to_thread(self._sop.start)
         await asyncio.to_thread(self._minutes.start)
+        self._meeting_task = asyncio.create_task(self._meeting.loop())
         scheme = "https" if ssl_ctx else "http"
         auth = " (password required)" if self._config.web_password else ""
         logger.info(f"Web viewer listening on {scheme}://{host}:{port}{auth}")
@@ -2292,6 +2636,14 @@ class WebViewerServer:
     async def stop(self):
         await asyncio.to_thread(self._sop.stop)
         await asyncio.to_thread(self._minutes.stop)
+        self._meeting.stopping = True
+        if self._meeting_task is not None:
+            self._meeting_task.cancel()
+            try:
+                await self._meeting_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._meeting_task = None
         await self._captions.close()
         if self._server is not None:
             self._server.close()
@@ -2450,6 +2802,22 @@ class WebViewerServer:
         if entry is None:
             raise ValueError("Recording no longer exists")
         return self._minutes.retry(key, summarizer, source=entry["path"], output_stem=Path(entry["name"]).stem)
+
+    def _live_summary_done(self, ws):
+        """Report a failed manual live summary to the viewer that asked."""
+        def done(task):
+            self._meeting_jobs.discard(task)
+            if task.cancelled() or task.exception() is None:
+                return
+            message = {**self._meeting.message(), "notice": str(task.exception())}
+
+            async def send():
+                try:
+                    await ws.send(json.dumps(message, ensure_ascii=False))
+                except Exception:
+                    pass
+            asyncio.ensure_future(send())
+        return done
 
     def _minutes_views(self, items):
         return {item["id"]: self._minutes.view(item["id"]) for item in items}
@@ -3290,10 +3658,17 @@ class WebViewerServer:
                             logger.exception("Minutes status unavailable")
                     for item in items:
                         item["minutes"] = minutes.get(item["id"])
+                    notes = []
+                    if self._minutes.enabled:
+                        try:
+                            notes = await asyncio.to_thread(self._minutes.notes)
+                        except Exception:
+                            logger.exception("Meeting notes list unavailable")
                     await ws.send(json.dumps({"type":"recordings_list", "items":items,
                                               "local":self._local_recording_client(ws),
                                               "sop_enabled":local_sop,"sop_prompt":sop_prompt,
-                                              "minutes_enabled":self._minutes.enabled}))
+                                              "minutes_enabled":self._minutes.enabled,
+                                              "meeting_notes":notes}))
                     continue
 
                 if ev_type == "recordings_open":
@@ -3316,6 +3691,34 @@ class WebViewerServer:
                         await ws.send(json.dumps({"type":"captions_state", "state":"unavailable", "detail":str(exc)}))
                     continue
 
+                if ev_type == "live_summary":
+                    action = ev.get("action")
+                    try:
+                        if ev.get("summarizer"):
+                            self._meeting.set_summarizer(str(ev["summarizer"]))
+                        if action == "set_interval":
+                            self._meeting.set_interval(ev.get("minutes"))
+                        elif action == "run":
+                            if self._meeting.running:
+                                raise ValueError("上一次总结还在进行中")
+                            # Long CLI run: never block this viewer's input loop.
+                            task = asyncio.create_task(self._meeting.run(manual=True))
+                            self._meeting_jobs.add(task)
+                            task.add_done_callback(self._live_summary_done(ws))
+                        elif action == "minutes":
+                            await asyncio.to_thread(self._meeting.generate_minutes)
+                        elif action not in (None, "sync", "set_summarizer"):
+                            raise ValueError("未知的要点操作")
+                        if action in (None, "sync", "set_summarizer"):
+                            await ws.send(json.dumps(self._meeting.message(), ensure_ascii=False))
+                    except (OSError, ValueError, TypeError) as exc:
+                        await ws.send(json.dumps({**self._meeting.message(), "notice": str(exc)}, ensure_ascii=False))
+                    continue
+
+                if ev_type == "captions_new_meeting":
+                    self._meeting.new_meeting()
+                    continue
+
                 if ev_type == "minutes_retry":
                     try:
                         summarizer = ev.get("summarizer") or None
@@ -3333,6 +3736,10 @@ class WebViewerServer:
                                                         {"minutes": ev.get("minutes")})
                         upload_session = ev["session"]
                         state["recording_session"] = not result["finished"]
+                        if not result["finished"]:
+                            # This meeting is recorded: its minutes come from the
+                            # recording, not from captions alone.
+                            self._meeting.note_recording()
                         if not result["finished"] and result.get("started_epoch"):
                             self._captions.begin_recording(
                                 upload_session,
