@@ -304,6 +304,8 @@ def test_viewer_live_summary_protocol(tmp_path):
         try:
             async with websockets.connect(f"ws://127.0.0.1:{config.web_port}/ws") as ws:
                 await _read(ws, "hello")
+                connect = await _read(ws, "live_summary")  # sent to every viewer, CC off
+                assert connect["session"] is None and connect["final"] is False
                 await ws.send(json.dumps({"type": "captions", "on": True}))
                 first = await _read(ws, "live_summary")
                 assert first["session"]["id"] and first["data"] is None

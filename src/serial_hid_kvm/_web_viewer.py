@@ -357,6 +357,8 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
 .ls-actions{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px}
 #lsMeta{color:#8fa6c4;font-size:12px;margin:2px 0 8px}
 #lsMeta.failed{color:#ffb48c}
+#lsMeta.final{color:#a6dfb8}
+#lsRetry{margin:-4px 0 8px}
 #lsContent h4{font-size:12px;color:#b7c6dc;margin:10px 0 4px;font-weight:600}
 #lsContent ul{margin:0 0 4px 18px;padding:0}
 #lsContent li{margin:2px 0}
@@ -500,6 +502,7 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
     <div class="side-body">
       <div class="ls-actions"><button id="lsNewMeeting" type="button" title="结束这次会议，下次字幕开始新的会议">新会议</button><button id="lsMinutes" type="button" title="用这次会议的字幕生成会议记录（只包含对方的声音）">生成会议记录</button><button id="lsCopy" type="button">复制</button><button id="lsExport" type="button">导出 .md</button></div>
       <p id="lsMeta">打开 CC 后，这里会定期显示会议要点。</p>
+      <button id="lsRetry" type="button" hidden title="重新生成这次的要点">重试</button>
       <div id="lsMinutesLine"></div>
       <div id="lsContent"></div>
     </div>
@@ -1687,17 +1690,17 @@ function lsSync() { if (ccOn) wsSend({type:"live_summary", action:"set_summarize
 recMinutesSelect.addEventListener("change", lsSync);
 lsInterval.addEventListener("change", () =>
   wsSend({type:"live_summary", action:"set_interval", minutes:parseInt(lsInterval.value, 10), summarizer:lsSummarizer()}));
-lsRun.addEventListener("click", () => {
-  if (!ccOn) { showHint("请先打开 CC"); return; }
-  wsSend({type:"live_summary", action:"run", summarizer:lsSummarizer()});
-});
+// With CC off this asks for the (final) summary of the meeting that just ended.
+function lsRequestRun() { wsSend({type:"live_summary", action:"run", summarizer:lsSummarizer()}); }
+lsRun.addEventListener("click", lsRequestRun);
+document.getElementById("lsRetry").addEventListener("click", lsRequestRun);
 document.getElementById("lsNewMeeting").addEventListener("click", () => {
   if (!ccOn) { showHint("请先打开 CC"); return; }
   if (!confirm("结束这次会议，从现在开始新的会议？（这次的字幕和要点会保存）")) return;
   wsSend({type:"captions_new_meeting"});
 });
 document.getElementById("lsMinutes").addEventListener("click", () => {
-  if (!ccOn) { showHint("请先打开 CC"); return; }
+  if (!lsLast || !lsLast.session || lsLast.session.closed) { showHint("没有进行中的会议；请先打开 CC"); return; }
   if (recMinutesSelect.value === "off") { showHint("「会议记录」设置为关闭；请先在录制菜单里选择总结方式"); return; }
   wsSend({type:"live_summary", action:"minutes", summarizer:lsSummarizer()});
   showHint("已用这次会议的字幕排队生成会议记录（只包含对方的声音）");
@@ -1734,16 +1737,21 @@ function lsRender() {
   const m = lsLast;
   if (!m) return;
   lsMeta.classList.toggle("failed", m.state === "failed");
+  lsMeta.classList.toggle("final", m.state === "idle" && !!m.final && !!m.data);
   const finals = (m.session && m.session.finals) || 0;
+  const hhmm = ms => { const d = new Date(ms); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
   let meta;
-  if (m.state === "running") meta = "正在总结…（" + (LS_NAMES[m.summarizer] || m.summarizer) + "）";
-  else if (m.state === "failed") meta = "总结失败：" + (m.error || "unknown");
+  if (m.state === "running") meta = (m.final ? "最终总结生成中…（" : "正在总结…（") + (LS_NAMES[m.summarizer] || m.summarizer) + "）";
+  else if (m.state === "failed") meta = (m.final ? "最终总结失败：" : "总结失败：") + (m.error || "unknown");
+  else if (m.data && m.at && m.final) meta = "最终总结（" + hhmm(m.at) + " 完成 · " + (LS_NAMES[m.used] || m.used) + "）";
   else if (m.data && m.at) meta = lsAgo(m.at) + "更新 · " + (LS_NAMES[m.used] || m.used);
   else meta = finals ? "已收到 " + finals + " 句字幕，尚未总结"
     : ccOn ? "会议已开始，等待字幕…" : "打开 CC 后，这里会定期显示会议要点。";
   if (m.summarizer === "off") meta += " · 「会议记录」为关闭，不自动总结";
+  if (m.session && m.session.closed) meta = "上一场会议 · " + meta;
   lsMeta.textContent = meta;
-  lsRun.disabled = m.state === "running";
+  lsRun.disabled = m.state === "running" || !!(m.session && m.session.closed);
+  document.getElementById("lsRetry").hidden = m.state !== "failed";
   lsMinutesLine.replaceChildren(...(m.minutes ? [minutesLine({id: m.minutes.id, minutes: m.minutes})].filter(Boolean) : []));
   const d = m.data;
   if (!d) { lsContent.replaceChildren(); return; }
@@ -2561,6 +2569,9 @@ class WebViewerServer:
                                     getattr(config, "captions_summary_interval", 5))
         self._meeting_task = None
         self._meeting_jobs: set = set()  # not awaited on stop (summaries can be long)
+        self._viewers: set = set()  # authenticated /ws clients (live_summary audience)
+        self._loop = None
+        self._meeting.publish = self._publish_meeting
         # Number of clients currently consuming the server JPEG stream.  The
         # capture device is only held while this is > 0, so a client switching
         # to "direct" (native getUserMedia) video frees the device for the
@@ -2604,6 +2615,7 @@ class WebViewerServer:
         )
         await asyncio.to_thread(self._sop.start)
         await asyncio.to_thread(self._minutes.start)
+        self._loop = asyncio.get_running_loop()
         self._meeting_task = asyncio.create_task(self._meeting.loop())
         scheme = "https" if ssl_ctx else "http"
         auth = " (password required)" if self._config.web_password else ""
@@ -2803,6 +2815,31 @@ class WebViewerServer:
             raise ValueError("Recording no longer exists")
         return self._minutes.retry(key, summarizer, source=entry["path"], output_stem=Path(entry["name"]).stem)
 
+    def _publish_meeting(self, message):
+        """Send live_summary to every viewer; callable from worker threads too."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        data = json.dumps(message, ensure_ascii=False)
+
+        async def send(ws):
+            try:
+                await ws.send(data)
+            except Exception:
+                pass
+
+        def schedule():
+            for ws in list(self._viewers):
+                loop.create_task(send(ws))
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if current is loop:
+            schedule()
+        else:
+            loop.call_soon_threadsafe(schedule)
+
     def _live_summary_done(self, ws):
         """Report a failed manual live summary to the viewer that asked."""
         def done(task):
@@ -2973,6 +3010,12 @@ class WebViewerServer:
                     "on": not wan,
                 }))
 
+            # Live meeting points - including a final summary made after CC
+            # was turned off - go to every authenticated viewer.
+            self._viewers.add(ws)
+            if self._captions.available:
+                await ws.send(json.dumps(self._meeting.message(), ensure_ascii=False))
+
             tasks = [
                 asyncio.create_task(self._send_capture_status(ws)),
                 asyncio.create_task(self._send_frames(ws, state)),
@@ -3002,6 +3045,7 @@ class WebViewerServer:
         finally:
             self._set_audio(state, False)
             self._set_captions(state, False)
+            self._viewers.discard(ws)
             self._clients.discard(ws)
             await self._stop_webrtc(state)
             await self._release_stream(state)
@@ -3699,10 +3743,9 @@ class WebViewerServer:
                         if action == "set_interval":
                             self._meeting.set_interval(ev.get("minutes"))
                         elif action == "run":
-                            if self._meeting.running:
-                                raise ValueError("上一次总结还在进行中")
-                            # Long CLI run: never block this viewer's input loop.
-                            task = asyncio.create_task(self._meeting.run(manual=True))
+                            # Long CLI run in the background (never blocks this
+                            # viewer's input loop); with CC off it is the final summary.
+                            task = self._meeting.request_run()
                             self._meeting_jobs.add(task)
                             task.add_done_callback(self._live_summary_done(ws))
                         elif action == "minutes":

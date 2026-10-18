@@ -48,7 +48,7 @@ Client→server binary is handled at the top of `_recv_input` (checks
 | `captions` | `on` (bool) | join/leave the shared live-caption feed (Target HDMI → kvm-ai-hub). Reply on off: `captions_state off`; when unavailable: `captions_state unavailable` |
 | `minutes_retry` | `id` (recording id), `summarizer?` | retry a failed minutes job from its last good step, re-summarize a done one with another summarizer, or create a job for an older recording; reply `minutes_action` |
 | `recordings_list` | — | reply `recordings_list` (items carry `minutes` status; `meeting_notes` lists caption-only minutes) |
-| `live_summary` | `action` (`run` / `set_interval` / `set_summarizer` / `minutes` / `sync`), `minutes?` (interval: 0/3/5/10), `summarizer?` (`agy`/`codex`/`mac-qwen`/`off`, accepted with any action) | live meeting points of the current CC session: `run` = summarize now (never concurrent; failures come back as `notice`), `set_interval` = server-wide auto-summary interval (persisted in `.captions/settings.json`), `minutes` = queue minutes from this session's captions; every action is answered/broadcast as `live_summary` |
+| `live_summary` | `action` (`run` / `set_interval` / `set_summarizer` / `minutes` / `sync`), `minutes?` (interval: 0/3/5/10), `summarizer?` (`agy`/`codex`/`mac-qwen`/`off`, accepted with any action) | live meeting points of the current CC session: `run` = summarize now (never concurrent; failures come back as `notice`; with CC off it (re)runs the final summary - this is the 重试 button), `set_interval` = server-wide auto-summary interval (persisted in `.captions/settings.json`), `minutes` = queue minutes from this session's captions; every action is answered/broadcast as `live_summary` |
 | `captions_new_meeting` | — | finalize the current CC session and start a new one (broadcast `live_summary` with the new `session`) |
 
 `send(obj)` is gated by view-only; `wsSend(obj)` is raw (use for control msgs
@@ -68,7 +68,7 @@ like `stream`, and recording uses `ws.send` directly).
 | `rec_saved` | `path` | show "Saved: …" |
 | `rec_error` | `error` | show error |
 | `caption` | `seq`,`t0`,`t1` (s from hub stream start),`text`,`lang`,`final`,`at`/`end` (epoch ms),`replay?` | `final: false` = interim (overlay only; later interim and the final with the same `seq` replace it in place). Finals go to the overlay (max 2 lines) and history. `replay: true` = recent finals re-sent on subscribe (history only) |
-| `live_summary` | `state` (`idle`/`running`/`failed`), `data` (`{current_topic, points[], decisions[], todos[{task,owner,due}], open_questions[], new_since_last[]}` or null), `previous` (the summary before, for highlighting), `at` (ms), `used`, `error`, `interval`, `summarizer`, `session` `{id, started_at, finals, recorded}`, `minutes` (caption-minutes job view or null), `notice?` | render the meeting-points section; badge on CC when a new summary arrives while the section is hidden |
+| `live_summary` | `state` (`idle`/`running`/`failed`), `final` (bool: the running/latest summary is the final one made after CC was turned off; on `failed` = the final summary failed), `data` (`{current_topic, points[], decisions[], todos[{task,owner,due}], open_questions[], new_since_last[]}` or null), `previous` (the summary before, for highlighting), `at` (ms), `used`, `error`, `interval`, `summarizer`, `session` `{id, started_at, finals, recorded, summarized, final_pending, closed}` (`closed`: no session is open; this is the newest finalized session, shown so its final summary stays visible), `minutes` (caption-minutes job view or null), `notice?` | render the meeting-points section; badge on CC when a new summary arrives while the section is hidden. Sent to EVERY authenticated viewer (CC on or off), once at connect and on every change |
 | `captions_state` | `state` (`off`/`connecting`/`live`/`offline`/`unavailable`), `detail` | CC button styling, offline notice over the video |
 | `minutes_action` | `id`, `message` or `error` | hint + refresh recordings list |
 | `recordings_list` | `items[]` (each `minutes`: null or `{state, label, summarizer, used, error, links{minutes, minutes_md, transcript, live_vtt}}`), `minutes_enabled`, `local`, `sop_enabled`, `sop_prompt` | render list / result card |
@@ -132,3 +132,17 @@ free to drop the H264 rate (per-encoder bounds stamped by
   Summarizer = the viewer's 会议记录 choice (`set_summarizer`), same fallback
   chain as minutes; `mac-qwen` never falls back to a cloud CLI.
 - Interim captions (`final: false`) never reach history, `.live.vtt` or jsonl.
+
+### Final summary when CC is turned off
+
+- `CaptionService.on_stopped` fires after the last viewer left, LINGER passed
+  and the hub flushed the last sentence. If the session has unsummarized
+  finals and the summarizer is not `off`, `meta.json` gets
+  `final_pending: true` and a server task runs one final summary - also with
+  the auto interval off, and whether or not any page is still open.
+- It waits for a summary that is already running and then tops up while
+  finals remain unsummarized. Reopening CC during it turns the result into an
+  ordinary summary (`final: false`) and the meeting continues.
+- Saved as `summary-NNNN.json` with `"final": true`; `final_pending` is
+  cleared afterwards. A pending final summary is resumed at server start.
+- The 10-minute finalize waits while a final summary is running.
