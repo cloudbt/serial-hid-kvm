@@ -6,6 +6,7 @@ import re
 import threading
 from datetime import datetime
 import math
+import time
 
 
 class RecordingSessions:
@@ -35,7 +36,7 @@ class RecordingSessions:
             os.fsync(file.fileno())
         os.replace(temporary, path)
 
-    def attach(self, session, filename):
+    def attach(self, session, filename, options=None):
         with self.lock:
             manifest, source = self._paths(session)
             if manifest.exists():
@@ -55,7 +56,12 @@ class RecordingSessions:
             # Include the session ID to keep distinct tabs with equal clocks
             # from publishing the same filename.
             state = {"id":session, "filename":Path(filename).stem + "-" + session[:8] + ".mp4",
-                     "next":0, "size":0, "finished":False}
+                     "next":0, "size":0, "finished":False,
+                     # Server clock at first attach: origin for live captions.
+                     "started_epoch":time.time()}
+            minutes = (options or {}).get("minutes") if isinstance(options, dict) else None
+            if minutes in ("agy", "codex", "mac-qwen", "off"):
+                state["minutes"] = minutes
             self._save(manifest, state)
             return state
 
