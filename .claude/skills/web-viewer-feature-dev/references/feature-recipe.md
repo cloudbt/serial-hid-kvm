@@ -120,3 +120,22 @@ Run the `py_compile` + `node --check` block from SKILL.md. Restart server, reloa
   `sop_agy_executable`.
 - Tests: `tests/test_captions.py`, `tests/test_minutes.py`;
   `tests/conftest.py` keeps every test off the real hub/LLM/`~/Videos`.
+
+### Docked side panel, display size, live meeting points (captions v2)
+- Layout is driven by CSS variables on `:root`: `--side-w` (docked panel
+  width, 0 when closed or <= 600 px), `--tb-h` (toolbar height, 0 in
+  fullscreen auto-hide / hidden toolbar), `--bar-h` (forgot-to-record bar).
+  `#container` = `calc(100% - --side-w)` x `calc(100% - --tb-h - --bar-h)`,
+  top-left aligned. `updateLayout()` recomputes them (resize, fullscreen,
+  body class changes, toolbar ResizeObserver, panel drag) and a ResizeObserver
+  on `#container` re-runs `updateCanvasSize()` so Fit follows the area.
+- Display > Size (`#displayZoom`, localStorage `kvmDisplaySize`): Fit or a
+  factor of the source width (`displayZoom`); the 1:1/Fit button toggles
+  between Fit and the last fixed size.
+- Side panel (`#sidePanel`): `#ccHistory` (top) + `#livePoints` (bottom),
+  `#sideSplit` ratio (`kvmSideRatio`), `#sideResize` width (`kvmSideWidth`),
+  fold state per section (`kvmSideFold:<id>`), open state (`kvmSideOpen`).
+- Forgot-to-record bar (`#meetingBar`): CC live + finals for >= 2 min + this
+  browser not recording; 本次忽略 is per CC session (sessionStorage).
+- Tests: `tests/test_live_meeting.py`, `tests/test_web_display.py`
+  (zoom/Fit/panel widths keep the 0-4095 mapping).

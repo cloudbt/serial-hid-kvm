@@ -50,6 +50,14 @@
   cursor styling on `#container`. Use `activeEl()/mediaW()/mediaH()` for geometry.
 
 ## Input / cursor alignment
+- Mapping invariant: `mouseCoords()` divides by `activeEl().getBoundingClientRect()`
+  at event time, so ANY layout change (docked panel, left alignment, zoom,
+  reminder bar, fullscreen) is safe as long as the element box equals the
+  drawn picture: canvas stretches its bitmap, `<video>` must keep
+  `object-fit: fill`. Never add padding/border/transform to `#screen`/`#video`
+  or letterbox inside them. Synthetic `MouseEvent` clientX/Y are truncated
+  to integers, so test probes must compute expectations from the integer
+  coordinates they dispatch.
 - Mouse uses **absolute** CH9329 packets with coords as a 0-4095 fraction of the
   active display. This is resolution-independent and is why host/target cursors
   line up — keep it fraction-based, never raw pixels.
