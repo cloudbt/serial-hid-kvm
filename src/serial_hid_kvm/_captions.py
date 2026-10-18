@@ -165,6 +165,9 @@ class CaptionService:
         # on_subscribe() -> extra messages queued for a newly subscribed viewer.
         self.on_final = None
         self.on_subscribe = None
+        # on_stopped() runs once the hub link has closed because nobody wants
+        # captions any more (after LINGER and the final-sentence flush).
+        self.on_stopped = None
 
     @property
     def active(self):
@@ -299,6 +302,11 @@ class CaptionService:
         finally:
             self._epoch = None
             self._set_state("off")
+            if self.on_stopped is not None:
+                try:
+                    self.on_stopped()
+                except Exception:
+                    logger.exception("Caption stop hook failed")
 
     def _connect(self):
         headers = {"Authorization": f"Bearer {self._key}"} if self._key else {}

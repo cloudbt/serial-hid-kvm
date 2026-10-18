@@ -439,7 +439,10 @@ $env:SHKVM_MAC_LLM_KEY = "<splash key>"   # only for Mac Qwen minutes
   from the captions alone into `recording_dir/meeting-notes/` (remote voice
   only) — also done automatically for unrecorded meetings when the CC session
   ends. Captions are kept in `recording_dir/.captions/` and a session resumes
-  if CC is reopened within 10 minutes (even after a restart).
+  if CC is reopened within 10 minutes (even after a restart). Turning CC
+  off triggers one last **final summary** in the background (even with the
+  interval off, and even if the page is closed); it stays visible in the
+  panel afterwards, also after a page reload with CC off.
 - **Forgot to record?** After 2 minutes of continuous captions without a
   recording in this browser, a bar above the picture offers 「开始录制」.
 - **Display > Size** — Fit or 50–150 % (1:1 = 100 %); the picture is
