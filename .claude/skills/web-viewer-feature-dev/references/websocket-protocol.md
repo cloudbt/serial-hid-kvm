@@ -16,6 +16,7 @@ Defined in `_web_viewer.py`: client side in the `_VIEWER_HTML` JS (`ws.onmessage
 | server→client | `0x01` | JPEG bytes | video frame |
 | server→client | `0x02` | PCM int16 LE | audio chunk |
 | client→server | `0x10` | WebM bytes | recording chunk (appended to file) |
+| client→server | `0x11` | u32 BE sequence + WebM bytes | resumable recording-session block (acked by `rec_ack`) |
 
 Send pattern (server): `await ws.send(b"\x01" + jpeg_bytes)`.
 Read pattern (client): `view[0]` is the tag, `ev.data.slice(1)` is payload.
@@ -42,6 +43,11 @@ Client→server binary is handled at the top of `_recv_input` (checks
 | `webrtc_stop` | — | close the WebRTC session; JPEG stream resumes |
 | `rec_start` | `filename` | open recording file under `recording_dir` |
 | `rec_stop` | — | close file, reply `rec_saved` |
+| `rec_session_start` | `session` (32 hex), `filename`, `minutes?` (`agy`/`codex`/`mac-qwen`/`off`) | attach/resume a resumable recording session; `minutes` is stored in `session.json` on first attach (later attaches keep the original), together with `started_epoch` (server clock, origin of `.live.vtt`) |
+| `rec_session_finish` | `session`, `next`, `metadata?` | finish; reply `rec_session_saved`; starts MP4 export AND queues meeting minutes (independent, minutes are NOT under `_conversion_lock`) |
+| `captions` | `on` (bool) | join/leave the shared live-caption feed (Target HDMI → kvm-ai-hub). Reply on off: `captions_state off`; when unavailable: `captions_state unavailable` |
+| `minutes_retry` | `id` (recording id), `summarizer?` | retry a failed minutes job from its last good step, re-summarize a done one with another summarizer, or create a job for an older recording; reply `minutes_action` |
+| `recordings_list` | — | reply `recordings_list` (items carry `minutes` status) |
 
 `send(obj)` is gated by view-only; `wsSend(obj)` is raw (use for control msgs
 like `stream`, and recording uses `ws.send` directly).
@@ -52,13 +58,17 @@ like `stream`, and recording uses `ws.send` directly).
 | `auth_required` | — | first message on password-protected servers: send stored token silently or show the login overlay |
 | `auth_ok` | `token` | store token (sessionStorage + optional localStorage), hide overlay; session continues with `hello` |
 | `auth_failed` | `error`, `expired?` | `expired: true` = stale token → clear it and prompt for password; otherwise show the error (wrong password / lockout) |
-| `hello` | `build`,`webrtc` (bool),`adaptive` (bool) | auto-reload check; disable H264 button if server lacks aiortc; `adaptive` tells a WAN client to send `frame_ack` per received frame. Also the "session started" signal — mode restore (direct/rtc re-setup after reconnect) runs here, NOT in `ws.onopen`, because pre-auth messages are dropped |
+| `hello` | `build`,`webrtc` (bool),`adaptive` (bool),`captions` `{available, reason}`,`minutes` `{enabled, default}` | auto-reload check; disable H264 button if server lacks aiortc; `adaptive` tells a WAN client to send `frame_ack` per received frame. Also the "session started" signal — mode restore (direct/rtc re-setup after reconnect) runs here, NOT in `ws.onopen`, because pre-auth messages are dropped |
 | `audio_config` | `sampleRate`,`channels`,`on` (bool) | enable Audio button, configure worklet; `on` is the server-side subscription state this client started with (LAN: true, WAN: false) |
 | `capture_device` | `label` | Direct mode matches this device in `enumerateDevices()` |
 | `webrtc_answer` | `sdp`, `gen` | complete answer SDP → `setRemoteDescription` (applied only if `gen` matches the current offer — late answers are dropped) |
 | `webrtc_error` | `error`, `gen` | reject pending offer / show error (stale `gen` ignored) |
 | `rec_saved` | `path` | show "Saved: …" |
 | `rec_error` | `error` | show error |
+| `caption` | `seq`,`t0`,`t1` (s from hub stream start),`text`,`lang`,`final`,`at` (epoch ms of t0),`replay?` | overlay (max 2 lines) + history; `replay: true` = recent history re-sent on subscribe (history only, no overlay) |
+| `captions_state` | `state` (`off`/`connecting`/`live`/`offline`/`unavailable`), `detail` | CC button styling, offline notice over the video |
+| `minutes_action` | `id`, `message` or `error` | hint + refresh recordings list |
+| `recordings_list` | `items[]` (each `minutes`: null or `{state, label, summarizer, used, error, links{minutes, minutes_md, transcript, live_vtt}}`), `minutes_enabled`, `local`, `sop_enabled`, `sop_prompt` | render list / result card |
 
 ## LAN vs WAN split
 
@@ -84,3 +94,22 @@ free to drop the H264 rate (per-encoder bounds stamped by
 - Mouse coordinates are always a **0-4095 fraction of the active display**
   (`mouseCoords()` uses `activeEl().getBoundingClientRect()`), never raw pixels —
   this is what keeps the host and target cursors aligned across resolutions.
+
+## Live captions and meeting minutes (kvm-ai-hub)
+
+- `_captions.py` `CaptionService` (one per process): subscribes to the server
+  `AudioCapture` (Target HDMI), `Resampler` → mono 16 kHz s16le, 100 ms binary
+  frames to hub `WS /v1/captions` (`start` → `ready`, PCM, `stop`;
+  hub sends `caption`/`speech`/`error`). Ref-counted by viewer subscriptions
+  (asyncio queues) + 5 s linger; exponential backoff reconnect (≤30 s). Hub
+  key goes in the `Authorization` header and is scrubbed from state details.
+- `_minutes.py` `MinutesService`: background thread, jobs in
+  `recording_dir/.minutes/<recording_id>/job.json` (+ `lock` heartbeat for
+  processes sharing the folder). Steps: ffmpeg FLAC → hub
+  `POST /v1/jobs/transcribe` + poll `GET /v1/jobs/{id}` → `transcript.json`
+  + `<rec>.srt` → summarizer chain → `minutes.json` → `<rec>.minutes.md`.
+  Each step's output is a resume point.
+- Signed links (`RecordingLibrary.file_url`) now also serve `.md/.srt/.vtt`
+  as `text/plain`; `/recordings/minutes?<signed .minutes.md>` renders an
+  escaped HTML page (nonce CSP) with the video and seekable timestamps.
+- Mock hub for tests/dev: `tests/mock_ai_hub.py`.

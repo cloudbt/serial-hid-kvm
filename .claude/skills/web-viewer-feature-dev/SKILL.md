@@ -26,6 +26,8 @@ Direct mode, toolbar hotkey, perf tuning) so you don't re-explore the codebase.
 - `hid_protocol.py` — `CH9329` serial + packet builders (`build_keyboard_report`,
   `build_mouse_abs_packet` [coords 0-4095], `build_mouse_rel_packet`).
 - `_audio.py` — `AudioCapture` (PCM broadcast to subscriber queues).
+- `_captions.py` / `_minutes.py` — live captions (CC) and post-recording
+  meeting minutes via the LAN kvm-ai-hub; see websocket-protocol.md.
 - `config.py` — `Config` + load order (CLI > env `SHKVM_*` > YAML > default).
   Adding a setting = 4 edits (see references/feature-recipe.md).
 - `server.py` — CLI parser, `KvmHardware`, process wiring (`--headless`, `--web`).
