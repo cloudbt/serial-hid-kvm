@@ -401,7 +401,7 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
   <details class="tool-group">
     <summary title="Video mode and quality" data-compact="▶">Video</summary>
     <div class="tool-panel"><h3>Video mode</h3>
-      <p>Default: JPEG stream. Toggle a mode off to return.</p>
+      <p>Default: H264 stream. Toggle it off for the JPEG stream.</p>
       <div class="panel-row"><button id="btnRtc" title="H264 streaming; capture stays available to OCR/MCP">H264</button>
       <button id="btnDirect" title="Browser opens the local capture card directly">Direct</button></div>
       <label>H264 quality <select id="rtcQuality" aria-label="H264 quality">
@@ -555,6 +555,8 @@ let serverCaptureLabel = "";   // capture-device name reported by the server
 // Unlike Direct mode the server KEEPS the capture device, so server-side
 // OCR / MCP / capture_frame keep working while the viewer streams.
 let rtcMode = false;
+// H264 is the default mode; the first hello starts it (?rtc=0 keeps JPEG).
+let autoRtcPending = new URLSearchParams(location.search).get("rtc") !== "0";
 let rtcPc = null;              // active RTCPeerConnection
 let _rtcWait = null;           // {res, rej} while an offer awaits its answer
 let _rtcGen = 0;               // negotiation generation: pairs answers with
@@ -723,6 +725,8 @@ function connect() {
           } else {
             statusEl.textContent = "Connected";
           }
+          if (autoRtcPending) { autoRtcPending = false; autoRtc(); }
+          if (autoHdmiMonitorPending) { autoHdmiMonitorPending = false; autoStartHdmiMonitoring(); }
           // Direct video defaults OFF so the server keeps the capture device
           // and can share frames with server-side OCR / MCP / capture_frame
           // while the viewer is open.
@@ -2498,22 +2502,20 @@ updateCursor();                             // apply default cursor visibility
 container.focus();
 connect();
 
-// ?rtc=1 auto-starts the low-latency H.264 stream once the socket is up,
-// retrying while the server is still warming up (cold device open).
-if (new URLSearchParams(location.search).has("rtc")) {
-  let autoRtcTries = 0;
-  const autoRtc = async () => {
-    if (rtcMode || autoRtcTries >= 8) return;
-    if (document.getElementById("btnRtc").disabled) return;  // no aiortc
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      autoRtcTries++;
-      await enableRtc();
-      if (!rtcMode) setTimeout(autoRtc, 4000);
-    } else {
-      setTimeout(autoRtc, 500);
-    }
-  };
-  setTimeout(autoRtc, 500);
+// H.264 is the default video mode: the first hello auto-starts it, retrying
+// while the server is still warming up (cold device open). If it never comes
+// up the viewer stays on the JPEG stream. ?rtc=0 opts out (JPEG default).
+let autoRtcTries = 0;
+async function autoRtc() {
+  if (rtcMode || directStream || autoRtcTries >= 8) return;
+  if (document.getElementById("btnRtc").disabled) return;  // no aiortc
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    autoRtcTries++;
+    await enableRtc();
+    if (!rtcMode) setTimeout(autoRtc, 4000);
+  } else {
+    setTimeout(autoRtc, 500);
+  }
 }
 </script>
 </body>

@@ -57,7 +57,7 @@ Run the `py_compile` + `node --check` block from SKILL.md. Restart server, reloa
 - Client: `RTCPeerConnection` (recvonly, non-trickle: full-SDP offer after ICE
   gathering) → `webrtc_offer` over the WS; answer applied from `webrtc_answer`;
   remote track rendered in the same `<video>` element Direct uses
-  (`rtcMode` + `videoMode`); `?rtc=1` auto-starts; reconnect re-offers in
+  (`rtcMode` + `videoMode`); default ON — first `hello` calls `autoRtc()` (`?rtc=0` opts out); reconnect re-offers in
   `ws.onopen` (`restartRtc`); jitterBufferTarget/playoutDelayHint set to 0.
 - Server: `_start_webrtc`/`_stop_webrtc` in `_web_viewer.py`; `_webrtc.py` has
   `WebRtcSession` (aiortc pc, H264-first codec prefs set BEFORE
