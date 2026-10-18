@@ -551,7 +551,7 @@ The preview window plays audio immediately; the web viewer requires clicking the
 
 ### H264 (WebRTC) video mode
 
-The default JPEG stream re-encodes every frame on the server and decodes it in the browser, which limits fluidity at high resolutions. The **H264** button switches the video path to WebRTC: the server encodes the capture as H.264 (x264, zero-latency tuning) and streams it over a local `RTCPeerConnection`; the browser renders a hardware-decoded native `<video>` element with proper frame pacing.
+The JPEG stream re-encodes every frame on the server and decodes it in the browser, which limits fluidity at high resolutions. H264 mode (the default; the **H264** button toggles it) switches the video path to WebRTC: the server encodes the capture as H.264 (x264, zero-latency tuning) and streams it over a local `RTCPeerConnection`; the browser renders a hardware-decoded native `<video>` element with proper frame pacing.
 
 Unlike Direct mode, **the server keeps the capture device**, so the API (`capture_frame`), OCR tooling and MCP automation keep working while you watch — and it also works from a remote browser, not just locally. Input still flows over the WebSocket unchanged.
 
@@ -565,7 +565,7 @@ serial-hid-kvm --headless --web --webrtc-fps 60 --webrtc-bitrate 16000000
 
 - `--webrtc-fps` (default 60) — stream frame rate; duplicate frames are skipped automatically when the capture produces fewer.
 - `--webrtc-bitrate` (default 16 Mbps) — H.264 target bitrate. Raise it for crisper text during motion (scrolling), lower it for constrained links.
-- `http://127.0.0.1:9330/?rtc=1` auto-starts H264 mode on load.
+- H264 is the **default** mode: the viewer starts it on connect (retrying while the server warms up) and stays on JPEG if it never comes up. `http://127.0.0.1:9330/?rtc=0` keeps the JPEG stream on load.
 - If aiortc is not installed on the server, the H264 button is disabled with a hint.
 
 If the H.264 encoder (libx264) is unavailable in the installed PyAV build, the stream automatically falls back to VP8.
@@ -604,6 +604,8 @@ Use **Check audio** to see both input levels without saving a recording. Click
 it again to release the checking inputs. The **🎧 HDMI** button immediately to
 the right of **Record** independently starts/stops listening through the Host's
 default playback device; set that device to EarPods or your speaker in Windows.
+Listening is **on by default** when the viewer connects; if the browser blocks
+audio until a user gesture, it starts on the first click or key press.
 The adjacent slider and percentage control listening volume, independently of
 recording volume/mute. Narrow windows show a percentage button that opens the
 same slider. There are no duplicate listening controls in the recording menu.

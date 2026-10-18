@@ -15,6 +15,7 @@ let hdmiMonitor = null;
 let hdmiMonitorWanted = false;
 let hdmiMonitorEpoch = 0;
 let hdmiMonitorState = "off";
+let autoHdmiMonitorPending = true;  // HDMI listening defaults ON (first hello)
 const recEl = id => document.getElementById(id);
 // IDs are origin-scoped: the same card has a different ID at :9332. Match the
 // user-confirmed :9330 suffixes, then the distinct Windows device names.
@@ -137,7 +138,7 @@ function stopHdmiMonitoring() {
   hdmiMonitorState = "off";
   updateHdmiMonitorControls();
 }
-async function startHdmiMonitoring() {
+async function startHdmiMonitoring({auto = false} = {}) {
   const epoch = ++hdmiMonitorEpoch;
   hdmiMonitorWanted = true;
   hdmiMonitorState = "opening";
@@ -161,11 +162,27 @@ async function startHdmiMonitoring() {
   } catch (error) {
     mixer?.close();
     if (epoch !== hdmiMonitorEpoch) return;
+    if (auto && /suspended/i.test(error.message)) {
+      // Browsers keep audio suspended until a user gesture: stay ON and
+      // retry on the first click/key anywhere on the page.
+      updateHdmiMonitorControls("click anywhere to start audio");
+      const retry = () => {
+        window.removeEventListener("pointerdown", retry, true);
+        window.removeEventListener("keydown", retry, true);
+        if (hdmiMonitorWanted && epoch === hdmiMonitorEpoch) startHdmiMonitoring();
+      };
+      window.addEventListener("pointerdown", retry, true);
+      window.addEventListener("keydown", retry, true);
+      return;
+    }
     hdmiMonitorWanted = false;
     hdmiMonitorState = "error";
     updateHdmiMonitorControls(error.message);
-    showHint("HDMI listening failed: " + error.message);
+    if (!auto) showHint("HDMI listening failed: " + error.message);
   }
+}
+function autoStartHdmiMonitoring() {
+  if (!hdmiMonitorWanted) startHdmiMonitoring({auto:true});
 }
 recEl("btnHdmiMonitor").addEventListener("click", () => {
   if (hdmiMonitorWanted) stopHdmiMonitoring(); else startHdmiMonitoring();

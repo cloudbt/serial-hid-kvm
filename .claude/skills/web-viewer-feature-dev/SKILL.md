@@ -128,7 +128,7 @@ Get-NetTCPConnection -LocalPort 9329 -State Listen | %{ Stop-Process -Id $_.Owni
 
 For a real E2E check without touching the user's session, drive a **headless
 Chrome** against the live server and read the server log (proven to work for
-the WebRTC/H264 path — `?rtc=1` auto-starts it):
+the WebRTC/H264 path — it auto-starts by default; `?rtc=0` keeps JPEG):
 
 ```powershell
 & "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" --headless=new `
