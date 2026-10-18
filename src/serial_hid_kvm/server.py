@@ -536,6 +536,9 @@ def _build_parser() -> argparse.ArgumentParser:
                              " SHKVM_AI_HUB_KEY)")
     parser.add_argument("--captions-language", type=str, metavar="LANG",
                         help="Live caption language (default: auto)")
+    parser.add_argument("--captions-summary-interval", type=int, metavar="MIN",
+                        help="Live meeting points every N minutes while CC is on"
+                             " (0, 3, 5 or 10; default: 5)")
     parser.add_argument("--no-captions", action="store_true",
                         help="Disable live captions in the web viewer")
     parser.add_argument("--no-minutes", action="store_true",

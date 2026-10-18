@@ -85,6 +85,9 @@ class Config:
         self.ai_hub_key: str | None = None
         self.captions_enabled: bool = True
         self.captions_language: str = "auto"
+        # Live meeting points while CC is on: minutes between automatic
+        # summaries (0 = off; 3/5/10).  Changed at runtime from the viewer.
+        self.captions_summary_interval: int = 5
         # Meeting minutes after a recording session finishes.  Summarizer:
         # agy | codex | mac-qwen | off; on failure the next entries of
         # minutes_fallback_order are tried (mac-qwen never falls back to a
@@ -126,7 +129,7 @@ _FILE_KEYS = {
     "webrtc_fps", "webrtc_bitrate",
     "recording_dir",
     "sop_project_dir", "sop_agy_executable", "sop_segment_seconds", "sop_agy_timeout",
-    "ai_hub_url", "ai_hub_key", "captions_enabled", "captions_language",
+    "ai_hub_url", "ai_hub_key", "captions_enabled", "captions_language", "captions_summary_interval",
     "minutes_enabled", "minutes_summarizer", "minutes_fallback_order", "minutes_timeout",
     "mac_llm_url", "mac_llm_key", "mac_llm_model", "codex_executable",
     "audio_device",
@@ -220,6 +223,7 @@ _ENV_MAP = {
     "SHKVM_AI_HUB_KEY": "ai_hub_key",
     "SHKVM_CAPTIONS": "captions_enabled",
     "SHKVM_CAPTIONS_LANGUAGE": "captions_language",
+    "SHKVM_CAPTIONS_SUMMARY_INTERVAL": "captions_summary_interval",
     "SHKVM_MINUTES": "minutes_enabled",
     "SHKVM_MINUTES_SUMMARIZER": "minutes_summarizer",
     "SHKVM_MINUTES_FALLBACK_ORDER": "minutes_fallback_order",
@@ -294,6 +298,7 @@ def _apply_args(config: Config, args):
         # argv is visible in the process list.
         "ai_hub_url": "ai_hub_url",
         "captions_language": "captions_language",
+        "captions_summary_interval": "captions_summary_interval",
         "minutes_summarizer": "minutes_summarizer",
         "minutes_fallback_order": "minutes_fallback_order",
         "minutes_timeout": "minutes_timeout",

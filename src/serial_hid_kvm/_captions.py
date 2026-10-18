@@ -161,6 +161,21 @@ class CaptionService:
         self._epoch = None
         self._history = deque(maxlen=self.HISTORY)
         self._recordings = {}
+        # Optional hooks (LiveMeeting): on_final(item) for every final caption,
+        # on_subscribe() -> extra messages queued for a newly subscribed viewer.
+        self.on_final = None
+        self.on_subscribe = None
+
+    @property
+    def active(self):
+        """True while any viewer has CC on (or within the linger window)."""
+        return self._wanted()
+
+    def broadcast(self, message):
+        self._broadcast(message)
+
+    def clear_history(self):
+        self._history.clear()
 
     # -- viewers -----------------------------------------------------------
     def state_message(self):
@@ -177,6 +192,12 @@ class CaptionService:
             q.put_nowait({**item, "replay": True})
         self._subscribers.add(q)
         self._idle_since = None
+        if self.on_subscribe is not None:
+            try:
+                for message in self.on_subscribe() or ():
+                    q.put_nowait(message)
+            except Exception:
+                logger.exception("Caption subscribe hook failed")
         if self._task is None or self._task.done():
             self._kick = asyncio.Event()
             self._task = asyncio.create_task(self._run())
@@ -356,7 +377,9 @@ class CaptionService:
         epoch = self._epoch or time.time()
         item = {"type": "caption", "seq": msg.get("seq"), "t0": t0, "t1": t1, "text": text,
                 "lang": str(msg.get("lang") or "")[:16], "final": msg.get("final", True) is not False,
-                "at": int((epoch + t0) * 1000)}
+                "at": int((epoch + t0) * 1000), "end": int((epoch + max(t0, t1)) * 1000)}
+        # Interim (final: false) results only update viewers' overlays; the
+        # hub re-sends the same seq with final: true when the sentence ends.
         if item["final"]:
             self._history.append(item)
             for vtt in list(self._recordings.values()):
@@ -364,4 +387,9 @@ class CaptionService:
                     vtt.add(epoch + t0, epoch + max(t1, t0), text)
                 except OSError as exc:
                     logger.warning("Live VTT write failed (%s): %s", vtt.path, exc)
+            if self.on_final is not None:
+                try:
+                    self.on_final(item)
+                except Exception:
+                    logger.exception("Caption final hook failed")
         self._broadcast(item)

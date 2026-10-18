@@ -335,6 +335,7 @@ All use the `SHKVM_` prefix:
 | `SHKVM_AI_HUB_KEY` | — | Bearer key for kvm-ai-hub (env/YAML only, no CLI flag) |
 | `SHKVM_CAPTIONS` | `true` | Enable the CC (live captions) button |
 | `SHKVM_CAPTIONS_LANGUAGE` | `auto` | Language hint for captions and transcription |
+| `SHKVM_CAPTIONS_SUMMARY_INTERVAL` | `5` | Live meeting points every N minutes while CC is on (`0`/`3`/`5`/`10`) |
 | `SHKVM_MINUTES` | `true` | Generate meeting minutes after recordings |
 | `SHKVM_MINUTES_SUMMARIZER` | `agy` | Default summarizer: `agy`, `codex`, `mac-qwen`, `off` |
 | `SHKVM_MINUTES_FALLBACK_ORDER` | `agy,codex,mac-qwen` | Tried after the chosen one fails (`mac-qwen` never falls back) |
@@ -429,8 +430,23 @@ $env:SHKVM_AI_HUB_KEY = "<hub key>"
 $env:SHKVM_MAC_LLM_KEY = "<splash key>"   # only for Mac Qwen minutes
 ```
 
+- **Side panel** (CC ▾ → 面板) — docked on the right (the picture area
+  shrinks instead of being covered; drag the left edge for width, the middle
+  bar for the split). Top: caption history. Bottom: **会议要点** — live meeting
+  points summarized from the final captions every 3/5/10 minutes (or
+  「立即总结」) with the summarizer chosen in 会议记录; new items are
+  highlighted. 「新会议」 starts a new CC session; 「生成会议记录」 writes minutes
+  from the captions alone into `recording_dir/meeting-notes/` (remote voice
+  only) — also done automatically for unrecorded meetings when the CC session
+  ends. Captions are kept in `recording_dir/.captions/` and a session resumes
+  if CC is reopened within 10 minutes (even after a restart).
+- **Forgot to record?** After 2 minutes of continuous captions without a
+  recording in this browser, a bar above the picture offers 「开始录制」.
+- **Display > Size** — Fit or 50–150 % (1:1 = 100 %); the picture is
+  top-left aligned.
+
 A mock hub for development lives in `tests/mock_ai_hub.py`
-(`python -m tests.mock_ai_hub --port 8765 --key devkey --caption-every 3`).
+(`python -m tests.mock_ai_hub --port 8765 --key devkey --caption-every 3 --interim-every 0.7`).
 
 ## Preview Window
 

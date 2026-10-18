@@ -11,6 +11,8 @@ Implements the API contract used by ``_captions.py`` / ``_minutes.py``:
 
 Captions come from a crude energy VAD (a sentence ends after 0.5 s of
 silence) or, with ``caption_every``, every N seconds of received audio.
+With ``interim_every`` the hub also sends ``final: false`` interim results
+(growing text, same ``seq`` as the coming final) while a sentence is spoken.
 Transcripts are synthetic: one Japanese segment per ``segment_seconds`` of
 FLAC audio (length read from the STREAMINFO block).
 
@@ -47,9 +49,10 @@ def flac_seconds(data):
 
 class MockHub:
     def __init__(self, key=None, caption_every=None, job_seconds=1.0, segment_seconds=10.0,
-                 fail_jobs=False, host="127.0.0.1", port=0):
+                 fail_jobs=False, host="127.0.0.1", port=0, interim_every=None):
         self.key = key
         self.caption_every = caption_every
+        self.interim_every = interim_every
         self.job_seconds = job_seconds
         self.segment_seconds = segment_seconds
         self.fail_jobs = fail_jobs
@@ -197,6 +200,12 @@ class MockHub:
             send(1, json.dumps(data, ensure_ascii=False).encode())
 
         seq, speaking, silence, speech_start, last_emit = 0, False, 0, 0.0, 0.0
+        last_interim = 0.0
+        sentence = "テスト字幕 {n}：会議の音声を認識しています。"
+
+        def interim(t, start, text):
+            send_json({"type": "caption", "seq": seq + 1, "t0": round(start, 3), "t1": round(t, 3),
+                       "text": text, "lang": "ja", "final": False})
         try:
             while True:
                 head = rfile.read(2)
@@ -243,8 +252,12 @@ class MockHub:
                     if t - last_emit >= self.caption_every:
                         seq += 1
                         send_json({"type": "caption", "seq": seq, "t0": round(last_emit, 3), "t1": round(t, 3),
-                                   "text": f"テスト字幕 {seq}：会議の音声を認識しています。", "lang": "ja", "final": True})
-                        last_emit = t
+                                   "text": sentence.format(n=seq), "lang": "ja", "final": True})
+                        last_emit = last_interim = t
+                    elif self.interim_every and t - last_interim >= self.interim_every:
+                        last_interim = t
+                        full = sentence.format(n=seq + 1)
+                        interim(t, last_emit, full[:max(1, int(len(full) * (t - last_emit) / self.caption_every))])
                     continue
                 rms = math.sqrt(sum(s * s for s in pcm) / max(1, len(pcm)))
                 if rms > 300:
@@ -252,6 +265,9 @@ class MockHub:
                         speaking, speech_start = True, t_before
                         send_json({"type": "speech", "active": True, "t": round(t_before, 3)})
                     silence = 0
+                    if self.interim_every and t - last_interim >= self.interim_every:
+                        last_interim = t
+                        interim(t, speech_start, f"発話 {seq + 1}" + "…" * int((t - speech_start) / self.interim_every))
                 elif speaking:
                     silence += len(pcm)
                     if silence >= 8000:
@@ -284,9 +300,12 @@ def main():
     parser.add_argument("--key", default=None)
     parser.add_argument("--caption-every", type=float, default=None,
                         help="emit a caption every N seconds of audio instead of using VAD")
+    parser.add_argument("--interim-every", type=float, default=None,
+                        help="also send final:false interim results every N seconds while speaking (e.g. 0.7)")
     parser.add_argument("--job-seconds", type=float, default=5.0)
     args = parser.parse_args()
-    hub = MockHub(args.key, args.caption_every, args.job_seconds, host=args.host, port=args.port)
+    hub = MockHub(args.key, args.caption_every, args.job_seconds, host=args.host, port=args.port,
+                  interim_every=args.interim_every)
     print(f"mock kvm-ai-hub on {hub.url} (key {'set' if args.key else 'not required'})", flush=True)
     hub.server.serve_forever()
 
