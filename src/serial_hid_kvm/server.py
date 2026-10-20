@@ -545,6 +545,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--captions-summary-interval", type=int, metavar="MIN",
                         help="Live meeting points every N minutes while CC is on"
                              " (0, 3, 5 or 10; default: 0 = off)")
+    parser.add_argument("--captions-mic", type=str, metavar="NAME",
+                        help="Host microphone captioned as the user's own voice: part of its"
+                             " name (default: --recording-mic; 'off' = target HDMI audio only)")
+    parser.add_argument("--captions-meeting-gap", type=int, metavar="MIN",
+                        help="A caption after MIN minutes without any starts a new meeting"
+                             " (default: 30; 0 = never)")
     parser.add_argument("--no-captions", action="store_true",
                         help="Disable live captions in the web viewer")
     parser.add_argument("--no-minutes", action="store_true",

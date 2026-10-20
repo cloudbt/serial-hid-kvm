@@ -336,6 +336,8 @@ All use the `SHKVM_` prefix:
 | `SHKVM_CAPTIONS` | `true` | Enable the CC (live captions) button |
 | `SHKVM_CAPTIONS_LANGUAGE` | `auto` | Language hint for captions and transcription |
 | `SHKVM_CAPTIONS_SUMMARY_INTERVAL` | `0` | Initial auto-summary interval while CC is on (`0`/`3`/`5`/`10`); every new meeting starts with it off |
+| `SHKVM_CAPTIONS_MIC` | *(= recording mic)* | Host microphone captioned as the user's own voice (part of its name); `off` = Target HDMI audio only |
+| `SHKVM_CAPTIONS_MEETING_GAP` | `30` | A caption after this many minutes without any starts a new meeting (`0` = never) |
 | `SHKVM_MINUTES` | `true` | Generate meeting minutes after recordings |
 | `SHKVM_MINUTES_SUMMARIZER` | `agy` | Default summarizer: `agy`, `codex`, `mac-qwen`, `off` |
 | `SHKVM_MINUTES_FALLBACK_ORDER` | `agy,codex,mac-qwen` | Tried after the chosen one fails (`mac-qwen` never falls back) |
@@ -406,7 +408,13 @@ show_cursor: false
 Both use **kvm-ai-hub**, a LAN service (Mac mini) that runs Qwen3-ASR.
 
 - **CC button** — live captions of the *Target HDMI* audio (the server's
-  `audio_device`, never the host mic). CC is one switch on the server, shared
+  `audio_device`, labelled 「对方」) and of the user's own voice from the host
+  microphone (`captions_mic`, default the recording mic `EarPods`, labelled
+  「我」). Each source is its own hub stream, so every line knows its speaker.
+  「我的麦克风」 in the CC ▾ menu switches the microphone off and on (server
+  setting per Target, on by default); the device is only opened while it is
+  captioned, and an unplugged microphone never stops the HDMI captions. All
+  caption times are Japan time (JST). CC is one switch on the server, shared
   by every viewer (turn it on on the PC and the phone shows it on too) and
   kept across restarts; viewers disconnecting or reconnecting never change
   it. The server keeps one hub connection while CC is on and sends plain
@@ -444,8 +452,14 @@ $env:SHKVM_MAC_LLM_KEY = "<splash key>"   # only for Mac Qwen minutes
   「新会议」 starts a new CC session; 「生成会议记录」 writes minutes from the
   captions alone into `recording_dir/meeting-notes/` (remote voice only).
   Captions are kept in `recording_dir/.captions/` and a session resumes if CC
-  is reopened within 10 minutes (even after a restart). CC, the interval and
-  the summarizer live in `recording_dir/.captions/settings.json`.
+  is reopened within 10 minutes (even after a restart). A caption after 30
+  minutes without any starts a new meeting (`captions_meeting_gap`), so CC can
+  stay on all day. CC, the microphone switch, the interval and the summarizer
+  live in `recording_dir/.captions/settings.json`.
+- **Times** — the caption history, meeting points and caption-only minutes
+  (`.minutes.md`, `.srt`) use JST wall-clock times; recording minutes show JST
+  next to the position in the video (`10:07:23 · 00:07:23`, links seek the
+  video). Summaries see who spoke (`ME:` / `REMOTE:`).
 - **Forgot to record?** After 2 minutes of continuous captions without a
   recording in this browser, a bar above the picture offers 「开始录制」.
 - **Display > Size** — Fit or 50–150 % (1:1 = 100 %); the picture is

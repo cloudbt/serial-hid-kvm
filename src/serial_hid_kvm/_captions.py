@@ -1,14 +1,16 @@
-"""Live captions: target HDMI audio -> kvm-ai-hub (LAN) -> caption text.
+"""Live captions: target HDMI audio + host microphone -> kvm-ai-hub (LAN) -> caption text.
 
-One CaptionService per KVM process (= per target).  It subscribes to the
-server-side AudioCapture (the target's HDMI audio, never the host mic),
-downmixes to mono 16 kHz s16le and streams ~100 ms PCM blocks to the hub's
+One CaptionService per KVM process (= per target).  Each audio source has
+its own hub stream: the server-side AudioCapture of the target's HDMI audio
+(the other participants, speaker ``remote``) and, unless switched off, the
+host microphone (the user wearing it, speaker ``me``).  Audio is downmixed to
+mono 16 kHz s16le and streamed in ~100 ms PCM blocks to the hub's
 ``/v1/captions`` WebSocket.  The hub does AGC + VAD sentence splitting and
-answers with final caption lines.
+answers with caption lines; every line carries its speaker.
 
-Reference counted: the hub connection exists only while at least one viewer
-has CC on (plus a short linger so a page reload does not churn the hub).
-Lost connections are retried with exponential backoff.  Captions are fanned
+The streams run while CC is switched on (one server-wide switch); the host
+microphone is opened only while it is captioned.  Lost connections are
+retried with exponential backoff.  Captions are fanned
 out to every subscribed viewer as plain text (WAN-friendly), and — while a
 recording session is open — appended to ``<recording>.live.vtt`` aligned to
 the recording start (reference only; the post-recording transcript is the
@@ -31,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 HUB_RATE = 16000
 BLOCK_SAMPLES = HUB_RATE // 10  # 100 ms per binary frame
+REMOTE, ME = "remote", "me"      # speakers: target HDMI audio / host microphone
+VTT_VOICE = {REMOTE: "对方", ME: "我"}
 
 
 class Resampler:
@@ -107,7 +111,7 @@ class LiveVtt:
         self.created = time.time()
         self.count = 0
 
-    def add(self, start_epoch, end_epoch, text):
+    def add(self, start_epoch, end_epoch, text, speaker=REMOTE):
         start, end = start_epoch - self.origin, end_epoch - self.origin
         text = " ".join(str(text).split()).replace("-->", "->")
         if end <= 0 or not text:
@@ -119,7 +123,8 @@ class LiveVtt:
             "timings are approximate. The post-recording transcript is authoritative.\n\n")
         self.count += 1
         with self.path.open("a", encoding="utf-8", newline="\n") as file:
-            file.write(f"{head}{self.count}\n{_vtt_time(start)} --> {_vtt_time(end)}\n{text}\n\n")
+            file.write(f"{head}{self.count}\n{_vtt_time(start)} --> {_vtt_time(end)}\n"
+                       f"<v {VTT_VOICE.get(speaker, VTT_VOICE[REMOTE])}>{text}\n\n")
 
 
 class HubError(RuntimeError):
@@ -133,12 +138,29 @@ def _get_chunk(q):
         return None
 
 
+class SourceError(HubError):
+    """An audio source could not be opened (e.g. the host microphone is unplugged)."""
+
+
+class _Link:
+    """One audio source streamed to its own hub caption session."""
+
+    def __init__(self, speaker, audio=None, opener=None):
+        self.speaker = speaker
+        self.audio = audio        # fixed source (the target's HDMI AudioCapture)
+        self.opener = opener      # or: open on demand, closed when not wanted (host mic)
+        self.task = None
+        self.kick = None
+        self.state = ("off", "")
+        self.epoch = None
+
+
 class CaptionService:
     MAX_BACKOFF = 30.0
     HISTORY = 300
     RECORDING_MAX_AGE = 8 * 3600
 
-    def __init__(self, audio, hub_url, key=None, language="auto", enabled=True):
+    def __init__(self, audio, hub_url, key=None, language="auto", enabled=True, mic=None, mic_name=""):
         self._audio = audio
         self._key = key or None
         self._language = language or "auto"
@@ -157,12 +179,16 @@ class CaptionService:
         # starting or stopping the hub link.
         self.on = False
         self.on_since = None
+        # The user's own voice: a second hub stream from the host microphone
+        # (mic() opens it), labelled "me". Its own switch, on by default.
+        self.mic_name = mic_name or ""
+        self.mic_available = bool(self.available and mic is not None)
+        self.mic_on = self.mic_available
+        self._links = {REMOTE: _Link(REMOTE, audio=audio)}
+        if self.mic_available:
+            self._links[ME] = _Link(ME, opener=mic)
         self._subscribers = set()
         self._viewers_left = time.monotonic()  # no viewer since (None while any)
-        self._task = None
-        self._kick = None
-        self._state = ("off", "")
-        self._epoch = None
         self._history = deque(maxlen=self.HISTORY)
         self._recordings = {}
         # Optional hooks (LiveMeeting): on_final(item) for every final caption,
@@ -184,14 +210,31 @@ class CaptionService:
             return False
         self.on = on
         self.on_since = time.time() if on else None
-        if on:
-            if self._task is None or self._task.done():
-                self._kick = asyncio.Event()
-                self._task = asyncio.create_task(self._run())
-            elif self._kick is not None:
-                self._kick.set()  # skip a pending backoff wait
+        self._start_links()
         self._broadcast(self.state_message())
         return True
+
+    def set_mic(self, on):
+        """Include the host microphone (the user's voice); True when it changed."""
+        on = bool(on)
+        if on and not self.mic_available:
+            raise ValueError("No host microphone configured for captions")
+        if on == self.mic_on:
+            return False
+        self.mic_on = on
+        self._start_links()
+        self._broadcast(self.state_message())
+        return True
+
+    def _start_links(self):
+        for link in self._links.values():
+            if not self._wanted(link):
+                continue
+            if link.task is None or link.task.done():
+                link.kick = asyncio.Event()
+                link.task = asyncio.create_task(self._run(link))
+            elif link.kick is not None:
+                link.kick.set()  # skip a pending backoff wait
 
     def viewers_idle(self):
         """Seconds since the last viewer left (0 while anyone is connected)."""
@@ -205,9 +248,11 @@ class CaptionService:
 
     # -- viewers -----------------------------------------------------------
     def state_message(self):
-        state, detail = self._state
-        return {"type": "captions_state", "state": state, "detail": detail,
-                "on": self.on, "since": self.on_since}
+        state, detail = self._links[REMOTE].state
+        mic_state, mic_detail = self._links[ME].state if ME in self._links else ("off", "")
+        return {"type": "captions_state", "state": state, "detail": detail, "on": self.on, "since": self.on_since,
+                "mic": {"available": self.mic_available, "on": self.mic_on, "name": self.mic_name,
+                        "state": mic_state, "detail": mic_detail}}
 
     def subscribe(self):
         """Register a viewer queue: CC state, recent captions while on, meeting state."""
@@ -242,17 +287,17 @@ class CaptionService:
                     pass
             q.put_nowait(message)
 
-    def _set_state(self, state, detail=""):
+    def _set_state(self, link, state, detail=""):
         if self._key:
             detail = detail.replace(self._key, "***")
-        if (state, detail) == self._state:
+        if (state, detail) == link.state:
             return
-        self._state = (state, detail)
-        logger.info("Captions %s%s", state, f": {detail}" if detail else "")
+        link.state = (state, detail)
+        logger.info("Captions%s %s%s", " (mic)" if link.speaker == ME else "", state, f": {detail}" if detail else "")
         self._broadcast(self.state_message())
 
-    def _wanted(self):
-        return self.on
+    def _wanted(self, link):
+        return self.on and (link.speaker == REMOTE or self.mic_on)
 
     # -- recordings --------------------------------------------------------
     def begin_recording(self, session, path, origin):
@@ -266,18 +311,19 @@ class CaptionService:
         vtt = self._recordings.pop(session, None)
         return vtt.path if vtt is not None and vtt.path.exists() else None
 
-    # -- hub link ----------------------------------------------------------
+    # -- hub links ---------------------------------------------------------
     async def close(self):
-        """Server shutdown: stop the hub link (the saved CC switch is kept)."""
+        """Server shutdown: stop the hub links (the saved CC switch is kept)."""
         self._subscribers.clear()
         self.on = False
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._task = None
+        for link in self._links.values():
+            if link.task is not None:
+                link.task.cancel()
+                try:
+                    await link.task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                link.task = None
 
     def _describe(self, exc):
         status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None)
@@ -295,32 +341,32 @@ class CaptionService:
             return f"hub unreachable ({urlsplit(self._url).netloc})"
         return f"hub error: {type(exc).__name__}"
 
-    async def _run(self):
+    async def _run(self, link):
         backoff = 1.0
         try:
-            while self._wanted():
-                self._set_state("connecting")
+            while self._wanted(link):
+                self._set_state(link, "connecting")
                 try:
-                    await self._session()
+                    await self._session(link)
                     backoff = 1.0
                     continue
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    if not self._wanted():
+                    if not self._wanted(link):
                         break
-                    self._set_state("offline", self._describe(exc))
-                self._kick.clear()
+                    self._set_state(link, "offline", self._describe(exc))
+                link.kick.clear()
                 deadline = time.monotonic() + backoff
-                while self._wanted() and time.monotonic() < deadline and not self._kick.is_set():
+                while self._wanted(link) and time.monotonic() < deadline and not link.kick.is_set():
                     try:
-                        await asyncio.wait_for(self._kick.wait(), min(1.0, max(0.05, deadline - time.monotonic())))
+                        await asyncio.wait_for(link.kick.wait(), min(1.0, max(0.05, deadline - time.monotonic())))
                     except asyncio.TimeoutError:
                         pass
                 backoff = min(backoff * 2, self.MAX_BACKOFF)
         finally:
-            self._epoch = None
-            self._set_state("off")
+            link.epoch = None
+            self._set_state(link, "off")
 
     def _connect(self):
         headers = {"Authorization": f"Bearer {self._key}"} if self._key else {}
@@ -332,49 +378,62 @@ class CaptionService:
         except ImportError:  # websockets < 14
             return websockets.connect(self._url, extra_headers=headers, **options)
 
-    async def _session(self):
-        loop = asyncio.get_running_loop()
-        async with self._connect() as ws:
-            await ws.send(json.dumps({"type": "start", "sample_rate": HUB_RATE, "language": self._language}))
-            while True:
-                reply = json.loads(await asyncio.wait_for(ws.recv(), 10))
-                if reply.get("type") == "ready":
-                    break
-                if reply.get("type") == "error":
-                    raise HubError("hub: " + str(reply.get("message", "error"))[:200])
-            q = self._audio.subscribe()
-            receiver = None
-            try:
-                resampler = Resampler(self._audio.samplerate, self._audio.channels)
-                pending = np.zeros(0, dtype="<i2")
-                self._epoch = None
-                receiver = asyncio.create_task(self._receive(ws))
-                self._set_state("live")
-                while self._wanted():
-                    chunk = await loop.run_in_executor(None, _get_chunk, q)
-                    if receiver.done():
-                        receiver.result()
-                        raise HubError("hub closed the caption stream")
-                    if chunk is None:
-                        continue
-                    if self._epoch is None:
-                        frames = len(chunk) // (2 * self._audio.channels)
-                        self._epoch = time.time() - frames / self._audio.samplerate
-                    pending = np.concatenate([pending, resampler.process(chunk)])
-                    while len(pending) >= BLOCK_SAMPLES:
-                        await ws.send(pending[:BLOCK_SAMPLES].tobytes())
-                        pending = pending[BLOCK_SAMPLES:]
-                await ws.send(json.dumps({"type": "stop"}))
-                try:  # let the hub flush the sentence in progress
-                    await asyncio.wait_for(asyncio.shield(receiver), 3)
-                except (asyncio.TimeoutError, websockets.ConnectionClosed, HubError):
-                    pass
-            finally:
-                self._audio.unsubscribe(q)
-                if receiver is not None and not receiver.done():
-                    receiver.cancel()
+    async def _open_source(self, link):
+        if link.audio is not None:
+            return link.audio, False
+        try:
+            return await asyncio.to_thread(link.opener), True
+        except Exception as exc:  # unplugged / busy device: retried with backoff
+            raise SourceError(f"microphone unavailable: {exc}"[:200]) from None
 
-    async def _receive(self, ws):
+    async def _session(self, link):
+        loop = asyncio.get_running_loop()
+        audio, opened = await self._open_source(link)
+        try:
+            async with self._connect() as ws:
+                await ws.send(json.dumps({"type": "start", "sample_rate": HUB_RATE, "language": self._language}))
+                while True:
+                    reply = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                    if reply.get("type") == "ready":
+                        break
+                    if reply.get("type") == "error":
+                        raise HubError("hub: " + str(reply.get("message", "error"))[:200])
+                q = audio.subscribe()
+                receiver = None
+                try:
+                    resampler = Resampler(audio.samplerate, audio.channels)
+                    pending = np.zeros(0, dtype="<i2")
+                    link.epoch = None
+                    receiver = asyncio.create_task(self._receive(ws, link))
+                    self._set_state(link, "live")
+                    while self._wanted(link):
+                        chunk = await loop.run_in_executor(None, _get_chunk, q)
+                        if receiver.done():
+                            receiver.result()
+                            raise HubError("hub closed the caption stream")
+                        if chunk is None:
+                            continue
+                        if link.epoch is None:
+                            frames = len(chunk) // (2 * audio.channels)
+                            link.epoch = time.time() - frames / audio.samplerate
+                        pending = np.concatenate([pending, resampler.process(chunk)])
+                        while len(pending) >= BLOCK_SAMPLES:
+                            await ws.send(pending[:BLOCK_SAMPLES].tobytes())
+                            pending = pending[BLOCK_SAMPLES:]
+                    await ws.send(json.dumps({"type": "stop"}))
+                    try:  # let the hub flush the sentence in progress
+                        await asyncio.wait_for(asyncio.shield(receiver), 3)
+                    except (asyncio.TimeoutError, websockets.ConnectionClosed, HubError):
+                        pass
+                finally:
+                    audio.unsubscribe(q)
+                    if receiver is not None and not receiver.done():
+                        receiver.cancel()
+        finally:
+            if opened:  # release the host microphone whenever it is not captioned
+                await asyncio.to_thread(audio.stop)
+
+    async def _receive(self, ws, link):
         async for raw in ws:
             if not isinstance(raw, str):
                 continue
@@ -386,9 +445,9 @@ class CaptionService:
             if kind == "error":
                 raise HubError("hub: " + str(msg.get("message", "error"))[:200])
             if kind == "caption":
-                self._caption(msg)
+                self._caption(msg, link)
 
-    def _caption(self, msg):
+    def _caption(self, msg, link):
         text = str(msg.get("text", "")).strip()[:2000]
         try:
             t0, t1 = float(msg.get("t0", 0)), float(msg.get("t1", 0))
@@ -396,17 +455,18 @@ class CaptionService:
             return
         if not text or not math.isfinite(t0) or not math.isfinite(t1):
             return
-        epoch = self._epoch or time.time()
+        epoch = link.epoch or time.time()
         item = {"type": "caption", "seq": msg.get("seq"), "t0": t0, "t1": t1, "text": text,
                 "lang": str(msg.get("lang") or "")[:16], "final": msg.get("final", True) is not False,
-                "at": int((epoch + t0) * 1000), "end": int((epoch + max(t0, t1)) * 1000)}
+                "speaker": link.speaker, "at": int((epoch + t0) * 1000), "end": int((epoch + max(t0, t1)) * 1000)}
         # Interim (final: false) results only update viewers' overlays; the
         # hub re-sends the same seq with final: true when the sentence ends.
+        # seq counts per hub stream, so viewers key lines by (speaker, seq).
         if item["final"]:
             self._history.append(item)
             for vtt in list(self._recordings.values()):
                 try:
-                    vtt.add(epoch + t0, epoch + max(t1, t0), text)
+                    vtt.add(epoch + t0, epoch + max(t1, t0), text, link.speaker)
                 except OSError as exc:
                     logger.warning("Live VTT write failed (%s): %s", vtt.path, exc)
             if self.on_final is not None:

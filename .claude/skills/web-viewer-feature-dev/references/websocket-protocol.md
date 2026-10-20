@@ -47,7 +47,8 @@ Client→server binary is handled at the top of `_recv_input` (checks
 | `rec_stop` | — | close file, reply `rec_saved` |
 | `rec_session_start` | `session` (32 hex), `filename`, `minutes?` (`agy`/`codex`/`mac-qwen`/`off`) | attach/resume a resumable recording session; `minutes` is stored in `session.json` on first attach (later attaches keep the original), together with `started_epoch` (server clock, origin of `.live.vtt`) |
 | `rec_session_finish` | `session`, `next`, `metadata?` | finish; reply `rec_session_saved`; starts MP4 export AND queues meeting minutes (independent, minutes are NOT under `_conversion_lock`) |
-| `captions` | `on` (bool) | join/leave the shared live-caption feed (Target HDMI → kvm-ai-hub). Reply on off: `captions_state off`; when unavailable: `captions_state unavailable` |
+| `captions` | `on` (bool) | switch CC for every viewer (server-wide, persisted); each viewer's feed follows it. When unavailable: `captions_state unavailable` to the sender |
+| `captions_mic` | `on` (bool) | caption the host microphone (「我」) or not, for every viewer (persisted); without a microphone: `captions_state` with `notice` |
 | `minutes_retry` | `id` (recording id), `summarizer?` | retry a failed minutes job from its last good step, re-summarize a done one with another summarizer, or create a job for an older recording; reply `minutes_action` |
 | `recordings_list` | — | reply `recordings_list` (items carry `minutes` status; `meeting_notes` lists caption-only minutes) |
 | `live_summary` | `action` (`run` / `set_interval` / `set_summarizer` / `minutes` / `sync`), `minutes?` (interval: 0/3/5/10), `summarizer?` (`agy`/`codex`/`mac-qwen`/`off`, accepted with any action) | live meeting points of the current CC session: `run` = summarize now (never concurrent; failures come back as `notice`; with CC off it (re)runs the final summary - this is the 重试 button), `set_interval` = server-wide auto-summary interval (persisted in `.captions/settings.json`), `minutes` = queue minutes from this session's captions; every action is answered/broadcast as `live_summary` |
@@ -72,9 +73,9 @@ like `stream`, and recording uses `ws.send` directly).
 | `srec_notice` | `message` | automatic stop (3 h limit, low disk, error) or a save failure |
 | `rec_saved` | `path` | show "Saved: …" |
 | `rec_error` | `error` | show error |
-| `caption` | `seq`,`t0`,`t1` (s from hub stream start),`text`,`lang`,`final`,`at`/`end` (epoch ms),`replay?` | `final: false` = interim (overlay only; later interim and the final with the same `seq` replace it in place). Finals go to the overlay (max 2 lines) and history. `replay: true` = recent finals re-sent on subscribe (history only) |
+| `caption` | `seq`,`t0`,`t1` (s from hub stream start),`text`,`lang`,`final`,`speaker` (`remote`/`me`),`at`/`end` (epoch ms),`replay?` | `final: false` = interim (overlay only; later interim and the final with the same `seq` replace it in place). Finals go to the overlay (max 2 lines) and history. `replay: true` = recent finals re-sent on subscribe (history only) |
 | `live_summary` | `state` (`idle`/`running`/`failed`), `final` (bool: the running/latest summary is the final one made after CC was turned off; on `failed` = the final summary failed), `data` (`{current_topic, points[], decisions[], todos[{task,owner,due}], open_questions[], new_since_last[]}` or null), `previous` (the summary before, for highlighting), `at` (ms), `used`, `error`, `interval`, `summarizer`, `session` `{id, started_at, finals, recorded, summarized, final_pending, closed}` (`closed`: no session is open; this is the newest finalized session, shown so its final summary stays visible), `minutes` (caption-minutes job view or null), `notice?` | render the meeting-points section; badge on CC when a new summary arrives while the section is hidden. Sent to EVERY authenticated viewer (CC on or off), once at connect and on every change |
-| `captions_state` | `state` (`off`/`connecting`/`live`/`offline`/`unavailable`), `detail` | CC button styling, offline notice over the video |
+| `captions_state` | `state` (`off`/`connecting`/`live`/`offline`/`unavailable`), `detail` (HDMI stream), `on`, `since` (epoch s), `mic` `{available, on, name, state, detail}` | CC button styling, offline notice over the video, 「我的麦克风」 |
 | `minutes_action` | `id`, `message` or `error` | hint + refresh recordings list |
 | `recordings_list` | `items[]` (each `minutes`: null or `{state, label, summarizer, used, error, links{minutes, minutes_md, transcript, live_vtt}}`), `minutes_enabled`, `local`, `sop_enabled`, `sop_prompt` | render list / result card |
 
@@ -105,12 +106,18 @@ free to drop the H264 rate (per-encoder bounds stamped by
 
 ## Live captions and meeting minutes (kvm-ai-hub)
 
-- `_captions.py` `CaptionService` (one per process): subscribes to the server
-  `AudioCapture` (Target HDMI), `Resampler` → mono 16 kHz s16le, 100 ms binary
-  frames to hub `WS /v1/captions` (`start` → `ready`, PCM, `stop`;
-  hub sends `caption`/`speech`/`error`). Ref-counted by viewer subscriptions
-  (asyncio queues) + 5 s linger; exponential backoff reconnect (≤30 s). Hub
-  key goes in the `Authorization` header and is scrubbed from state details.
+- `_captions.py` `CaptionService` (one per process): one hub stream per audio
+  source (`_Link`): the server `AudioCapture` (Target HDMI, speaker `remote`)
+  and the host microphone (`captions_mic`, speaker `me`, opened by
+  `_web_viewer._open_mic` only while captioned). `Resampler` → mono 16 kHz
+  s16le, 100 ms binary frames to hub `WS /v1/captions` (`start` → `ready`, PCM,
+  `stop`; hub sends `caption`/`speech`/`error`). Streams run while the
+  server-wide CC switch is on (`set_on`; the mic also needs `set_mic`) -
+  viewers joining or leaving never change it; exponential backoff reconnect
+  (≤30 s) per stream. Hub `seq` counts per stream: key lines by
+  (speaker, seq). Hub key goes in the `Authorization` header and is scrubbed
+  from state details. Tests never open a real microphone (conftest patches
+  `_open_mic`).
 - `_minutes.py` `MinutesService`: background thread, jobs in
   `recording_dir/.minutes/<recording_id>/job.json` (+ `lock` heartbeat for
   processes sharing the folder). Steps: ffmpeg FLAC → hub
@@ -124,18 +131,24 @@ free to drop the H264 rate (per-encoder bounds stamped by
 
 ### CC sessions and live meeting points (`_live_meeting.py`)
 
-- A CC session starts with the first CC subscriber. Final captions are
-  appended to `recording_dir/.captions/<YYYYmmdd-HHMMSS>-<id>.jsonl`; state and
-  every summary live in `.captions/<id>/` (`meta.json`, `summary-NNNN.json`).
-- The hub link stops after LINGER, but the session stays resumable for
-  `RESUME_WINDOW` (10 min: reloads, KVM restart). After that, or on
-  `captions_new_meeting`, it is finalized; an unrecorded session with
-  >= 10 finals over >= 2 min gets caption-only minutes in `meeting-notes/`
-  (skipped when a recording overlapped or 生成会议记录 already covered it).
-- Auto summary: every `interval` minutes (first one one interval after the
-  session starts), only if new finals arrived, never concurrently.
-  Summarizer = the viewer's 会议记录 choice (`set_summarizer`), same fallback
-  chain as minutes; `mac-qwen` never falls back to a cloud CLI.
+- A CC session (one meeting) starts when CC is switched on. Final captions
+  (with `speaker`) are appended to
+  `recording_dir/.captions/<YYYYmmdd-HHMMSS>-<id>.jsonl`; state and every
+  summary live in `.captions/<id>/` (`meta.json`, `summary-NNNN.json`).
+  `settings.json` holds the server-wide `cc`, `mic`, `interval`, `summarizer`.
+- After CC is switched off the session stays resumable for `RESUME_WINDOW`
+  (10 min). After that, on `captions_new_meeting`, or when a caption arrives
+  after `captions_meeting_gap` (30 min) without any, it is finalized - never
+  with an AI call.
+- AI runs only when asked: auto summary every `interval` minutes (off by
+  default and reset to off for every new session; first one one interval
+  after it is set), only if new finals arrived, never concurrently; or
+  `run` (立即总结) / `minutes` (生成会议记录). Summarizer = server setting
+  (`set_summarizer`), same fallback chain as minutes; `mac-qwen` never falls
+  back to a cloud CLI.
+- Summaries get `[HH:MM:SS] ME:/REMOTE: text` lines in JST
+  (`transcript_lines(segments, origin)`); caption minutes keep
+  seconds-from-start for the schema's `start_sec` and render JST.
 - Interim captions (`final: false`) never reach history, `.live.vtt` or jsonl.
 
 ### Final summary when CC is turned off

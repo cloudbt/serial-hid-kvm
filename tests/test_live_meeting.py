@@ -1,5 +1,6 @@
 """Live meeting points, CC sessions (jsonl/resume), interim captions, caption-only minutes."""
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import time
 
@@ -29,6 +30,7 @@ class _Captions:
     def __init__(self):
         self.active = True
         self.available = True
+        self.mic_available = self.mic_on = False
         self.idle = 0.0
         self.sent = []
         self._history = []
@@ -172,7 +174,9 @@ def test_live_summary_run_fallback_skip_and_interval(tmp_path):
         assert await meeting.run() is True
         assert [c[0] for c in calls] == ["agy", "codex"]
         prompt = calls[1][1]
-        assert "untrusted DATA" in prompt and "user's own speech is" in prompt and "[00:00:00] では始めます" in calls[1][2]
+        assert "untrusted DATA" in prompt and "user's own speech is" in prompt and "JST wall-clock" in prompt
+        jst = datetime.fromtimestamp(time.time(), timezone(timedelta(hours=9))).strftime("%H:%M")
+        assert calls[1][2].startswith(f"[{jst}") and calls[1][2].endswith("] では始めます")  # JST, no speaker labels
         states = [m["state"] for m in captions.sent]
         assert states[-2:] == ["running", "idle"] and captions.sent[-1]["used"] == "codex"
         assert captions.sent[-1]["data"]["current_topic"] == "リリース計画"
@@ -195,7 +199,7 @@ def test_live_summary_run_fallback_skip_and_interval(tmp_path):
         assert LiveMeeting(tmp_path, _Captions(), minutes).interval == 10
         meeting.set_summarizer("codex")
         saved = json.loads((tmp_path / ".captions" / "settings.json").read_text())
-        assert saved == {"cc": False, "interval": 10, "summarizer": "codex"}
+        assert saved == {"cc": False, "mic": False, "interval": 10, "summarizer": "codex"}
         assert LiveMeeting(tmp_path, _Captions(), minutes).summarizer == "codex"
         # Mac Qwen stays on the LAN: no cloud fallback for live points either.
         meeting.set_summarizer("mac-qwen")
@@ -219,11 +223,12 @@ def test_interim_captions_are_overlay_only(tmp_path):
     async def run():
         q = asyncio.Queue()
         service._subscribers.add(q)
-        service._epoch = time.time() - 5
+        link = service._links["remote"]
+        link.epoch = time.time() - 5
         for n in range(30):
             service._caption({"type": "caption", "seq": 7, "t0": 1, "t1": 1 + n / 10, "text": "途中" * (n + 1),
-                              "final": False})
-        service._caption({"type": "caption", "seq": 7, "t0": 1, "t1": 4, "text": "完成した文", "final": True})
+                              "final": False}, link)
+        service._caption({"type": "caption", "seq": 7, "t0": 1, "t1": 4, "text": "完成した文", "final": True}, link)
         sent = [q.get_nowait() for _ in range(q.qsize())]
         assert [m["final"] for m in sent] == [False] * 30 + [True]
         assert {m["seq"] for m in sent} == {7}
@@ -284,7 +289,10 @@ def test_caption_only_minutes_job(tmp_path):
     assert job["status"] == "done" and job["kind"] == "captions"
     assert "remote side only" in captured[0]
     md = (tmp_path / "meeting-notes" / "meeting-20261018-100000-abcd1234.minutes.md").read_text(encoding="utf-8")
-    assert "相手側" in md and "`00:00:30`" in md and ".mp4" not in md
+    # Times are JST wall-clock (base = 2027-01-15 17:00:00 JST).
+    assert "相手側" in md and "`17:00:30`" in md and "2027-01-15 17:00–17:02 JST" in md and ".mp4" not in md
+    srt = (tmp_path / "meeting-notes" / "meeting-20261018-100000-abcd1234.srt").read_text(encoding="utf-8")
+    assert "17:00:00,000 --> 17:00:02,000\n発言0" in srt
     assert (tmp_path / "meeting-notes" / "meeting-20261018-100000-abcd1234.srt").is_file()
     [note] = service.notes()
     assert note["minutes"]["state"] == "done" and set(note["minutes"]["links"]) == {"minutes", "minutes_md", "transcript"}

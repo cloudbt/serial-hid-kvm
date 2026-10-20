@@ -84,8 +84,10 @@ def test_live_vtt_alignment(tmp_path):
     text = (tmp_path / "r.live.vtt").read_text(encoding="utf-8")
     assert text.startswith("WEBVTT\n")
     assert "before recording" not in text
-    assert "00:00:00.000 --> 00:00:02.500\nstraddles start" in text
-    assert "00:44:21.250 --> 00:44:23.000\none hour in -> later" in text
+    assert "00:00:00.000 --> 00:00:02.500\n<v 对方>straddles start" in text
+    assert "00:44:21.250 --> 00:44:23.000\n<v 对方>one hour in -> later" in text
+    vtt.add(3700.0, 3702.0, "my answer", "me")
+    assert "<v 我>my answer" in (tmp_path / "r.live.vtt").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +150,7 @@ def test_service_streams_pcm_and_broadcasts_captions(tmp_path):
         assert service.available
         a, b = service.subscribe(), service.subscribe()
         assert (await _next(a, "captions_state"))["state"] == "off"
-        assert service._task is None  # viewers alone never start the hub link
+        assert service._links["remote"].task is None  # viewers alone never start the hub link
         assert service.set_on(True) and not service.set_on(True)
         while (await _next(a, "captions_state"))["state"] != "live":
             pass
@@ -165,14 +167,14 @@ def test_service_streams_pcm_and_broadcasts_captions(tmp_path):
         service.unsubscribe(a)
         service.unsubscribe(b)
         await asyncio.sleep(0.3)
-        assert not service._task.done()  # no viewer left: CC (and the hub link) stays on
+        assert not service._links["remote"].task.done()  # no viewer left: CC (and the hub link) stays on
         assert service.viewers_idle() > 0
         service.set_on(False)
         for _ in range(100):
-            if service._task is None or service._task.done():
+            if service._links["remote"].task is None or service._links["remote"].task.done():
                 break
             await asyncio.sleep(0.05)
-        assert service._task.done() and service.state_message()["state"] == "off"
+        assert service._links["remote"].task.done() and service.state_message()["state"] == "off"
         assert session["stopped"] is True
         assert audio.queues == []
         # While off a new viewer gets the state only; once on again, a replay.
@@ -284,7 +286,8 @@ def test_viewer_captions_protocol(tmp_path):
             url = f"ws://127.0.0.1:{config.web_port}/ws"
             async with websockets.connect(url) as one, websockets.connect(url) as two:
                 hello = await _read(one, "hello")
-                assert hello["captions"] == {"available": True, "reason": "", "on": False, "since": None}
+                assert hello["captions"]["on"] is False and hello["captions"]["since"] is None
+                assert hello["captions"]["available"] is True and hello["captions"]["mic"]["name"] == "EarPods"
                 assert hello["minutes"]["enabled"] is True and hello["minutes"]["default"] == "agy"
                 await _read(two, "hello")
                 await one.send(json.dumps({"type": "captions", "on": True}))  # one switch for everyone
