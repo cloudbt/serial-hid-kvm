@@ -143,6 +143,23 @@ class ApiDispatcher:
     def _do_ping(self, params: dict) -> dict:
         return {"pong": True, "target_name": self._config.target_name}
 
+    # -- CC meetings: read-only (files under recording_dir/.captions) --------
+
+    def _meetings(self):
+        from ._meeting_reader import MeetingReader
+        return MeetingReader(self._config.recording_dir)
+
+    def _do_meeting_list(self, params: dict) -> dict:
+        return self._meetings().list(params.get("date"), params.get("days", 1))
+
+    def _do_meeting_transcript(self, params: dict) -> dict:
+        return self._meetings().transcript(
+            params.get("meeting", "current"), params.get("since"), params.get("until"),
+            params.get("last_minutes"), params.get("offset", 0), params.get("max_chars", 60_000))
+
+    def _do_meeting_points(self, params: dict) -> dict:
+        return self._meetings().points(params.get("meeting", "current"))
+
     def _do_type_text(self, params: dict) -> dict:
         text = params["text"]
         delay_ms = params.get("char_delay_ms")

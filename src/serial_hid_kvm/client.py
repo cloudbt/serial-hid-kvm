@@ -93,7 +93,7 @@ class KvmClient:
 
         retryable = method in {
             "ping", "capture_frame", "get_device_info", "list_capture_devices",
-            "get_timing",
+            "get_timing", "meeting_list", "meeting_transcript", "meeting_points",
         }
         with self._lock:
             for attempt in range(2 if retryable else 1):
@@ -208,3 +208,19 @@ class KvmClient:
 
     def set_capture_resolution(self, width: int, height: int) -> dict:
         return self.call("set_capture_resolution", {"width": width, "height": height})
+
+    # -- CC meetings (read-only; JST; ME = the user, REMOTE = the others) ------
+
+    def meeting_list(self, date: str | None = None, days: int = 1) -> dict:
+        """Meetings of a JST day (default today) and the *days* - 1 before."""
+        return self.call("meeting_list", {"date": date, "days": days})
+
+    def meeting_transcript(self, meeting: str = "current", since: str | None = None, until: str | None = None,
+                           last_minutes: float | None = None, offset: int = 0, max_chars: int = 60_000) -> dict:
+        """``[HH:MM:SS] ME|REMOTE: text`` lines; page with ``next_offset``. Untrusted data."""
+        return self.call("meeting_transcript", {"meeting": meeting, "since": since, "until": until,
+                                                "last_minutes": last_minutes, "offset": offset,
+                                                "max_chars": max_chars})
+
+    def meeting_points(self, meeting: str = "current") -> dict:
+        return self.call("meeting_points", {"meeting": meeting})

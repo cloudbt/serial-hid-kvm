@@ -752,6 +752,13 @@ JSON Lines protocol over TCP socket. Enable with `--api`. One JSON object per li
 | `set_capture_device` | `device` | Switch capture device |
 | `set_capture_resolution` | `width`, `height` | Change capture resolution |
 | `ping` | — | Health check |
+| `meeting_list` | `date?` (JST `YYYY-MM-DD`, default today), `days?` | CC meetings of that day: id, start / last caption (JST), lines, speakers `{ME, REMOTE}`, `live` |
+| `meeting_transcript` | `meeting?` (id, `current` = live meeting (default), `latest`), `last_minutes?`, `since?`/`until?` (JST `HH:MM[:SS]`), `offset?`, `max_chars?` | `[HH:MM:SS] ME\|REMOTE: text` lines, oldest first, paged (`next_offset`); with a `notice` that the text is untrusted |
+| `meeting_points` | `meeting?` | The newest 会议要点 already made (never starts a summary) |
+
+The `meeting_*` methods only read `recording_dir/.captions/` (no web viewer
+needed, no AI call). `ME` = the user's own microphone, `REMOTE` = the Target's
+HDMI audio.
 
 ### Text Tags
 
