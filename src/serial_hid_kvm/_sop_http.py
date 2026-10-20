@@ -130,6 +130,12 @@ class SopService:
             return await call(store.document,request['id'])
         if action=='save_draft':
             return await call(store.save_draft,request['job_id'],request['markdown'],request['environment'],request.get('resolutions',{}))
+        if action=='feedback':
+            return await call(store.feedback,request['version_id'])
+        if action=='add_feedback':
+            return await call(store.add_feedback,request['version_id'],request['kind'],request['date'],request['environment'],request['scenario'],request['note'])
+        if action=='create_revision':
+            return await call(store.create_revision,request['version_id'])
         if action=='publish':
             if request.get('reviewed') is not True:
                 raise ValueError('需要明确核对通过后发布')
