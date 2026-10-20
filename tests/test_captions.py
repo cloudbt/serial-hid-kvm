@@ -145,10 +145,11 @@ def test_service_streams_pcm_and_broadcasts_captions(tmp_path):
 
     async def run():
         service = CaptionService(audio, hub.url, "secret-key", "ja")
-        service.LINGER = 0.2
         assert service.available
         a, b = service.subscribe(), service.subscribe()
         assert (await _next(a, "captions_state"))["state"] == "off"
+        assert service._task is None  # viewers alone never start the hub link
+        assert service.set_on(True) and not service.set_on(True)
         while (await _next(a, "captions_state"))["state"] != "live":
             pass
         service.begin_recording("s1", tmp_path / "rec.live.vtt", time.time())
@@ -163,6 +164,10 @@ def test_service_streams_pcm_and_broadcasts_captions(tmp_path):
         assert "-->" in (tmp_path / "rec.live.vtt").read_text(encoding="utf-8")
         service.unsubscribe(a)
         service.unsubscribe(b)
+        await asyncio.sleep(0.3)
+        assert not service._task.done()  # no viewer left: CC (and the hub link) stays on
+        assert service.viewers_idle() > 0
+        service.set_on(False)
         for _ in range(100):
             if service._task is None or service._task.done():
                 break
@@ -170,9 +175,12 @@ def test_service_streams_pcm_and_broadcasts_captions(tmp_path):
         assert service._task.done() and service.state_message()["state"] == "off"
         assert session["stopped"] is True
         assert audio.queues == []
-        # New subscriber after shutdown reconnects and gets a replay.
+        # While off a new viewer gets the state only; once on again, a replay.
         c = service.subscribe()
-        replay = await _next(c, "caption")
+        assert (await _next(c, "captions_state"))["on"] is False and c.empty()
+        service.set_on(True)
+        d = service.subscribe()
+        replay = await _next(d, "caption")
         assert replay.get("replay") is True
         await service.close()
 
@@ -190,6 +198,7 @@ def test_service_reports_offline_and_reconnects():
     async def run():
         service = CaptionService(audio, f"http://127.0.0.1:{port}", None)
         q = service.subscribe()
+        service.set_on(True)
         states = []
         while "offline" not in states:
             states.append((await _next(q, "captions_state"))["state"])
@@ -216,6 +225,7 @@ def test_service_bad_key_is_reported_without_leaking_it():
     async def run():
         service = CaptionService(audio, hub.url, "wrong-secret")
         q = service.subscribe()
+        service.set_on(True)
         while True:
             msg = await _next(q, "captions_state")
             if msg["state"] == "offline":
@@ -235,6 +245,8 @@ def test_unavailable_without_audio_or_when_disabled():
     assert not service.available and "audio" in service.reason
     with pytest.raises(ValueError):
         service.subscribe()
+    with pytest.raises(ValueError):
+        service.set_on(True)
     assert not CaptionService(_FakeAudioStatic(), "http://127.0.0.1:1", enabled=False).available
 
 
@@ -267,29 +279,27 @@ def test_viewer_captions_protocol(tmp_path):
         config.ai_hub_url = hub.url
         server = WebViewerServer(_DummyHardware(), config, audio=audio)
         server._cap_label = "dummy"
-        server._captions.LINGER = 0.1
         await server.start()
         try:
             url = f"ws://127.0.0.1:{config.web_port}/ws"
             async with websockets.connect(url) as one, websockets.connect(url) as two:
                 hello = await _read(one, "hello")
-                assert hello["captions"] == {"available": True, "reason": ""}
+                assert hello["captions"] == {"available": True, "reason": "", "on": False, "since": None}
                 assert hello["minutes"]["enabled"] is True and hello["minutes"]["default"] == "agy"
                 await _read(two, "hello")
-                for ws in (one, two):
-                    await ws.send(json.dumps({"type": "captions", "on": True}))
+                await one.send(json.dumps({"type": "captions", "on": True}))  # one switch for everyone
                 caption = await _read(one, "caption")
                 assert caption["text"].startswith("テスト字幕")
                 assert (await _read(two, "caption"))["text"]
                 assert len(hub.caption_sessions) == 1  # one hub link shared by both viewers
-                await one.send(json.dumps({"type": "captions", "on": False}))
-                assert (await _read(one, "captions_state"))["state"] == "off"
-                await _read(two, "caption")
+                await two.send(json.dumps({"type": "captions", "on": False}))
+                while (await _read(one, "captions_state"))["on"]:
+                    pass
             for _ in range(60):
                 if not audio.queues:
                     break
                 await asyncio.sleep(0.05)
-            assert audio.queues == []  # hub link closed once the last viewer left
+            assert audio.queues == []  # hub link closed once CC was switched off
         finally:
             await server.stop()
 

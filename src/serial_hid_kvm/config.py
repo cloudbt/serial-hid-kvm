@@ -90,8 +90,9 @@ class Config:
         self.captions_enabled: bool = True
         self.captions_language: str = "auto"
         # Live meeting points while CC is on: minutes between automatic
-        # summaries (0 = off; 3/5/10).  Changed at runtime from the viewer.
-        self.captions_summary_interval: int = 5
+        # summaries (0 = off; 3/5/10).  Set from the viewer; every new
+        # meeting starts with it off again.
+        self.captions_summary_interval: int = 0
         # Meeting minutes after a recording session finishes.  Summarizer:
         # agy | codex | mac-qwen | off; on failure the next entries of
         # minutes_fallback_order are tried (mac-qwen never falls back to a

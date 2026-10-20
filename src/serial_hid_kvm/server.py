@@ -544,7 +544,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Live caption language (default: auto)")
     parser.add_argument("--captions-summary-interval", type=int, metavar="MIN",
                         help="Live meeting points every N minutes while CC is on"
-                             " (0, 3, 5 or 10; default: 5)")
+                             " (0, 3, 5 or 10; default: 0 = off)")
     parser.add_argument("--no-captions", action="store_true",
                         help="Disable live captions in the web viewer")
     parser.add_argument("--no-minutes", action="store_true",

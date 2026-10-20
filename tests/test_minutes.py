@@ -185,6 +185,20 @@ def test_agy_backend_requires_guarded_transcript_read(tmp_path, monkeypatch):
     assert all(server.get("disabled") for server in mcp["mcpServers"].values())
 
 
+def test_agy_backend_accepts_read_file_from_newer_models(tmp_path, monkeypatch):
+    source = FAKE_AGY.replace('{"name": "view_file", "args": {"AbsolutePath": target}}',
+                              '{"name": "read_file", "args": {"Path": target}}')
+    exe = _wrapper(tmp_path, "agy", source)
+    monkeypatch.setenv("FAKE_RESULT", json.dumps(_good()))
+    work = tmp_path / "agy"
+    work.mkdir()
+    (work / "transcript.txt").write_text("[00:00:00] x\n", encoding="utf-8")
+    data = summarize_agy(str(exe), work, work / "transcript.txt", "p", 60, lambda: None)
+    assert data["title"] == "定例会議"
+    audit = [json.loads(line) for line in (work / ".agents" / "audit.jsonl").read_text().splitlines()]
+    assert [(a["tool"], a["decision"]) for a in audit if a["mode"] == "post"] == [("read_file", "auto_approve")]
+
+
 def test_agy_backend_without_read_evidence_is_rejected(tmp_path, monkeypatch):
     source = FAKE_AGY.replace('hook(post, call)\n', '')
     exe = _wrapper(tmp_path, "agy", source)

@@ -134,7 +134,6 @@ def _get_chunk(q):
 
 
 class CaptionService:
-    LINGER = 5.0
     MAX_BACKOFF = 30.0
     HISTORY = 300
     RECORDING_MAX_AGE = 8 * 3600
@@ -153,8 +152,13 @@ class CaptionService:
         elif audio is None:
             self.reason = "No target HDMI audio device configured on the server"
         self.available = bool(enabled and audio is not None and self._url)
+        # CC is a server-wide switch (set_on), not a per-viewer subscription:
+        # viewers come and go (reloads, phones suspending a tab) without
+        # starting or stopping the hub link.
+        self.on = False
+        self.on_since = None
         self._subscribers = set()
-        self._idle_since = None
+        self._viewers_left = time.monotonic()  # no viewer since (None while any)
         self._task = None
         self._kick = None
         self._state = ("off", "")
@@ -165,14 +169,33 @@ class CaptionService:
         # on_subscribe() -> extra messages queued for a newly subscribed viewer.
         self.on_final = None
         self.on_subscribe = None
-        # on_stopped() runs once the hub link has closed because nobody wants
-        # captions any more (after LINGER and the final-sentence flush).
-        self.on_stopped = None
 
     @property
     def active(self):
-        """True while any viewer has CC on (or within the linger window)."""
-        return self._wanted()
+        """True while CC is switched on (whether or not anyone is watching)."""
+        return self.on
+
+    def set_on(self, on):
+        """Switch CC for every viewer; True when the switch changed."""
+        on = bool(on)
+        if on and not self.available:
+            raise ValueError(self.reason or "Captions unavailable")
+        if on == self.on:
+            return False
+        self.on = on
+        self.on_since = time.time() if on else None
+        if on:
+            if self._task is None or self._task.done():
+                self._kick = asyncio.Event()
+                self._task = asyncio.create_task(self._run())
+            elif self._kick is not None:
+                self._kick.set()  # skip a pending backoff wait
+        self._broadcast(self.state_message())
+        return True
+
+    def viewers_idle(self):
+        """Seconds since the last viewer left (0 while anyone is connected)."""
+        return 0.0 if self._viewers_left is None else time.monotonic() - self._viewers_left
 
     def broadcast(self, message):
         self._broadcast(message)
@@ -183,35 +206,32 @@ class CaptionService:
     # -- viewers -----------------------------------------------------------
     def state_message(self):
         state, detail = self._state
-        return {"type": "captions_state", "state": state, "detail": detail}
+        return {"type": "captions_state", "state": state, "detail": detail,
+                "on": self.on, "since": self.on_since}
 
     def subscribe(self):
-        """Register a viewer queue; replays recent captions, starts the hub link."""
+        """Register a viewer queue: CC state, recent captions while on, meeting state."""
         if not self.available:
             raise ValueError(self.reason or "Captions unavailable")
         q = asyncio.Queue(maxsize=500)
         q.put_nowait(self.state_message())
-        for item in list(self._history)[-20:]:
-            q.put_nowait({**item, "replay": True})
+        if self.on:
+            for item in list(self._history)[-20:]:
+                q.put_nowait({**item, "replay": True})
         self._subscribers.add(q)
-        self._idle_since = None
+        self._viewers_left = None
         if self.on_subscribe is not None:
             try:
                 for message in self.on_subscribe() or ():
                     q.put_nowait(message)
             except Exception:
                 logger.exception("Caption subscribe hook failed")
-        if self._task is None or self._task.done():
-            self._kick = asyncio.Event()
-            self._task = asyncio.create_task(self._run())
-        elif self._kick is not None:
-            self._kick.set()  # skip a pending backoff wait
         return q
 
     def unsubscribe(self, q):
         self._subscribers.discard(q)
-        if not self._subscribers and self._idle_since is None:
-            self._idle_since = time.monotonic()
+        if not self._subscribers and self._viewers_left is None:
+            self._viewers_left = time.monotonic()
 
     def _broadcast(self, message):
         for q in list(self._subscribers):
@@ -232,9 +252,7 @@ class CaptionService:
         self._broadcast(self.state_message())
 
     def _wanted(self):
-        if self._subscribers:
-            return True
-        return self._idle_since is not None and time.monotonic() - self._idle_since < self.LINGER
+        return self.on
 
     # -- recordings --------------------------------------------------------
     def begin_recording(self, session, path, origin):
@@ -250,8 +268,9 @@ class CaptionService:
 
     # -- hub link ----------------------------------------------------------
     async def close(self):
+        """Server shutdown: stop the hub link (the saved CC switch is kept)."""
         self._subscribers.clear()
-        self._idle_since = time.monotonic() - self.LINGER
+        self.on = False
         if self._task is not None:
             self._task.cancel()
             try:
@@ -302,11 +321,6 @@ class CaptionService:
         finally:
             self._epoch = None
             self._set_state("off")
-            if self.on_stopped is not None:
-                try:
-                    self.on_stopped()
-                except Exception:
-                    logger.exception("Caption stop hook failed")
 
     def _connect(self):
         headers = {"Authorization": f"Bearer {self._key}"} if self._key else {}

@@ -28,9 +28,18 @@ class _Captions:
 
     def __init__(self):
         self.active = True
+        self.available = True
+        self.idle = 0.0
         self.sent = []
         self._history = []
         self.on_final = self.on_subscribe = None
+
+    def set_on(self, on):
+        changed, self.active = self.active != on, on
+        return changed
+
+    def viewers_idle(self):
+        return self.idle
 
     def broadcast(self, message):
         self.sent.append(message)
@@ -78,7 +87,7 @@ def test_session_jsonl_resume_and_finalize(tmp_path):
     assert captions.on_final == meeting.add_final
     [hello] = meeting.on_subscribe()
     sid = hello["session"]["id"]
-    assert hello["type"] == "live_summary" and hello["interval"] == 5 and hello["summarizer"] == "agy"
+    assert hello["type"] == "live_summary" and hello["interval"] == 0 and hello["summarizer"] == "agy"
     start = time.time() * 1000
     for n in range(12):
         _final(meeting, f"発言 {n}", int(start + n * 15000))
@@ -92,7 +101,7 @@ def test_session_jsonl_resume_and_finalize(tmp_path):
     assert again.ensure_session()["id"] == sid and again.session["finals"] == 12
     assert len(again.captions._history) == 12
 
-    # After the window the stale session is finalized; unrecorded + long enough -> caption minutes.
+    # After the window the stale session is finalized - without any AI call (no caption minutes).
     meta = tmp_path / ".captions" / sid / "meta.json"
     state = json.loads(meta.read_text(encoding="utf-8"))
     state["last_at"] = state["seen_at"] = time.time() - 3600
@@ -101,21 +110,16 @@ def test_session_jsonl_resume_and_finalize(tmp_path):
     later = LiveMeeting(tmp_path, _Captions(), minutes)
     assert later.ensure_session()["id"] != sid
     assert json.loads(meta.read_text(encoding="utf-8"))["finalized"]
-    (jsonl, stem, chosen, started, session), = minutes.queued
-    assert stem == "meeting-" + sid and chosen == "agy" and session == sid
+    assert minutes.queued == []
 
 
-def test_recorded_or_short_sessions_get_no_auto_minutes(tmp_path):
+def test_finalized_sessions_never_queue_minutes(tmp_path):
     captions, minutes = _Captions(), _Minutes()
     meeting = LiveMeeting(tmp_path, captions, minutes)
     meeting.ensure_session()
     for n in range(20):
         _final(meeting, f"x{n}", int((time.time() - 600 + n * 30) * 1000))
-    meeting.note_recording()
-    meeting.new_meeting()  # recorded: minutes come from the recording
-    meeting.ensure_session()
-    _final(meeting, "short")
-    meeting.new_meeting()  # too short
+    meeting.new_meeting()  # long, unrecorded meeting: still no automatic minutes
     assert minutes.queued == []
     assert captions.sent[-1]["session"]["finals"] == 0  # new meeting announced to viewers
 
@@ -136,7 +140,7 @@ def test_manual_minutes_cover_session_unless_captions_grew(tmp_path):
     meeting.generate_minutes()
     _final(meeting, "その後の発言")
     meeting.new_meeting()
-    assert len(minutes.queued) == 3  # grew after the manual run -> regenerated at the end
+    assert len(minutes.queued) == 2  # only 生成会议记录 queues minutes
 
 
 def test_live_summary_run_fallback_skip_and_interval(tmp_path):
@@ -158,11 +162,11 @@ def test_live_summary_run_fallback_skip_and_interval(tmp_path):
 
     async def run():
         meeting.ensure_session()
-        assert not meeting.due()  # no captions yet
-        with pytest.raises(ValueError):
-            await meeting.run(manual=True)
         _final(meeting, "では始めます")
-        assert not meeting.due()  # first automatic summary only one interval after the start
+        meeting.last_run -= 3600
+        assert meeting.interval == 0 and not meeting.due()  # automatic summaries are off by default
+        meeting.set_interval(5)
+        assert not meeting.due()  # first automatic summary only one interval after switching it on
         meeting.last_run -= 301
         assert meeting.due()
         assert await meeting.run() is True
@@ -189,6 +193,10 @@ def test_live_summary_run_fallback_skip_and_interval(tmp_path):
             meeting.set_interval(7)
         meeting.set_interval(10)
         assert LiveMeeting(tmp_path, _Captions(), minutes).interval == 10
+        meeting.set_summarizer("codex")
+        saved = json.loads((tmp_path / ".captions" / "settings.json").read_text())
+        assert saved == {"cc": False, "interval": 10, "summarizer": "codex"}
+        assert LiveMeeting(tmp_path, _Captions(), minutes).summarizer == "codex"
         # Mac Qwen stays on the LAN: no cloud fallback for live points either.
         meeting.set_summarizer("mac-qwen")
         calls.clear()
@@ -233,6 +241,7 @@ def test_mock_hub_interim_flow(tmp_path):
     async def run():
         service = CaptionService(audio, hub.url)
         q = service.subscribe()
+        service.set_on(True)
         first = await _next(q, "caption")
         seen = [first]
         while seen[-1]["final"] is False or len(seen) < 3:

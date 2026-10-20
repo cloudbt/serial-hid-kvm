@@ -320,7 +320,18 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
 .cc-controls{display:flex;align-items:center;gap:1px;flex-shrink:0}
 .cc-controls>button{border-radius:5px 0 0 5px!important;min-width:38px}
 #ccMenu>summary{background:#0f3460;border:1px solid #1a1a5e;border-radius:0 5px 5px 0;padding:3px 7px}
-#btnCC.cc-offline{border-color:#e2a96d;color:#ffd3a0}
+#toolbar #btnCC{display:inline-flex;align-items:center;gap:5px;font-weight:600;background:transparent;border:1px solid #4a5a72;color:#8796ad}
+#toolbar #btnCC .cc-dot{width:8px;height:8px;border-radius:50%;background:currentColor;opacity:.45}
+#toolbar #btnCC.cc-on{background:#1d9e75!important;border-color:#5dcaa5!important;color:#fff}
+#toolbar #btnCC.cc-on .cc-dot{opacity:1;background:#fff;animation:ccPulse 1.6s infinite}
+#toolbar #btnCC.cc-wait{background:#633806!important;border-color:#ef9f27!important;color:#fac775}
+#toolbar #btnCC.cc-wait .cc-dot{opacity:1;background:#ef9f27;animation:ccPulse .8s infinite}
+#toolbar #btnCC:disabled{border-style:dashed;color:#5f6b7d;opacity:1}
+@keyframes ccPulse{0%,100%{opacity:1}50%{opacity:.3}}
+.cc-pill{font-size:11px;padding:1px 8px;border-radius:10px;background:#2a3446;color:#8fa6c4;white-space:nowrap;margin-right:auto}
+.cc-pill.on{background:#085041;color:#9fe1cb}
+.cc-pill.wait{background:#633806;color:#fac775}
+#livePoints header strong{margin-right:0}
 .cc-panel{width:290px}
 #ccOverlay{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);width:max-content;max-width:min(92vw,1100px);z-index:15;pointer-events:none;display:flex;flex-direction:column;align-items:center;gap:4px;transition:opacity .5s}
 #ccOverlay.idle{opacity:0}
@@ -375,7 +386,7 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
 .minutes-line a,.minutes-line button{font:12px system-ui,sans-serif;color:#e0e9f7;background:#28466a;border:1px solid #45617d;border-radius:5px;padding:3px 7px;text-decoration:none;cursor:pointer}
 .minutes-line .minutes-failed{color:#ffb48c;overflow-wrap:anywhere}
 #recentMinutes .recent-file strong{font-weight:500}
-@media(max-width:600px){#toolbar #btnCC{padding:3px 6px}#ccOverlay{bottom:12px}#sidePanel{top:auto;height:60vh;width:100%;border-left:0;border-top:1px solid #384b66;z-index:22}#sideResize{display:none}}
+@media(max-width:600px){#toolbar #btnCC{padding:3px 6px}#toolbar #btnCC .cc-word{display:none}#ccOverlay{bottom:12px}#sidePanel{top:auto;height:60vh;width:100%;border-left:0;border-top:1px solid #384b66;z-index:22}#sideResize{display:none}}
 </style>
 </head>
 <body>
@@ -417,7 +428,7 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
   <span class="tool-divider"></span>
   <button id="btnAudio" title="Toggle audio playback" style="display:none">&#x1f507; Audio</button>
   <div class="cc-controls">
-    <button id="btnCC" type="button" aria-pressed="false" title="Live captions" disabled>CC</button>
+    <button id="btnCC" type="button" aria-pressed="false" title="Live captions" disabled><span class="cc-dot" aria-hidden="true"></span>CC<span class="cc-word">关</span></button>
     <details class="tool-group" id="ccMenu">
       <summary title="Caption settings and history" aria-label="Caption settings and history">▾</summary>
       <div class="tool-panel cc-panel"><h3>实时字幕</h3>
@@ -463,7 +474,7 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
         <div class="panel-row browser-only"><button id="btnRecInputs" title="Allow audio access and refresh devices">Inputs</button>
         <button id="btnRecCheck" title="Check audio without recording">Check audio</button></div>
         <p id="recAudioStatus" class="browser-only" role="status"></p>
-        <label id="recMinutesRow">会议记录 <select id="recMinutes" aria-label="Meeting minutes summarizer" title="录制结束后自动转写并生成会议记录（录制开始时确定）。敏感会议请选 Mac Qwen 或关闭：内容不出局域网。">
+        <label id="recMinutesRow">会议记录 <select id="recMinutes" aria-label="Meeting minutes summarizer" title="录制结束后自动转写并生成会议记录（录制开始时确定），也用于会议要点。服务端设置，所有观看者共用。敏感会议请选 Mac Qwen 或关闭：内容不出局域网。">
           <option value="agy">agy（默认）</option><option value="codex">codex</option><option value="mac-qwen">Mac Qwen（局域网内）</option><option value="off">关闭</option>
         </select></label>
         <h3>Recent recordings <button id="refreshRecordings" title="Refresh recent recordings">↻</button></h3>
@@ -508,12 +519,12 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
   </section>
   <div id="sideSplit" role="separator" aria-orientation="horizontal" aria-label="Resize sections" title="拖动调整上下比例"></div>
   <section id="livePoints" class="side-section" aria-label="Meeting points">
-    <header><button class="side-fold" type="button" data-section="livePoints" aria-expanded="true" title="折叠/展开">▾</button><strong>会议要点</strong>
-      <select id="lsInterval" aria-label="Automatic summary interval" title="自动总结间隔（服务端设置，所有观看者共用）"><option value="0">自动：关闭</option><option value="3">每 3 分钟</option><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option></select>
+    <header><button class="side-fold" type="button" data-section="livePoints" aria-expanded="true" title="折叠/展开">▾</button><strong>会议要点</strong><span id="lsCcPill" class="cc-pill" role="status">字幕关闭</span>
+      <select id="lsInterval" aria-label="Automatic summary interval" title="自动总结间隔（服务端设置，所有观看者共用；每次新会议重置为关闭）"><option value="0">自动：关闭</option><option value="3">每 3 分钟</option><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option></select>
       <button id="lsRun" type="button" title="用「会议记录」里选择的方式立即总结">立即总结</button></header>
     <div class="side-body">
       <div class="ls-actions"><button id="lsNewMeeting" type="button" title="结束这次会议，下次字幕开始新的会议">新会议</button><button id="lsMinutes" type="button" title="用这次会议的字幕生成会议记录（只包含对方的声音）">生成会议记录</button><button id="lsCopy" type="button">复制</button><button id="lsExport" type="button">导出 .md</button></div>
-      <p id="lsMeta">打开 CC 后，这里会定期显示会议要点。</p>
+      <p id="lsMeta">打开 CC 后，用「立即总结」或「自动」生成会议要点。</p>
       <button id="lsRetry" type="button" hidden title="重新生成这次的要点">重试</button>
       <div id="lsMinutesLine"></div>
       <div id="lsContent"></div>
@@ -782,7 +793,7 @@ function connect() {
         }
         else if (msg.type === "srec_notice") { statusEl.textContent = msg.message; showHint(msg.message); }
         else if (msg.type === "caption") { ccCaption(msg); }
-        else if (msg.type === "captions_state") { ccSetState(msg.state, msg.detail || ""); }
+        else if (msg.type === "captions_state") { ccSetState(msg.state, msg.detail || "", msg.on, msg.since); }
         else if (msg.type === "live_summary") { onLiveSummary(msg); }
         else if (msg.type === "minutes_action") {
           if (msg.error) showHint("会议记录：" + msg.error); else showHint(msg.message || "已加入会议记录队列");
@@ -1401,14 +1412,12 @@ function minutesConfigure(info) {
   minutesEnabled = !!(info && info.enabled);
   document.getElementById("recMinutesRow").hidden = !minutesEnabled;
   recMinutesSelect.disabled = !minutesEnabled;
-  let saved = null;
-  try { saved = localStorage.getItem("kvmMinutes"); } catch (e) {}
-  const choice = saved || (info && info.default) || "agy";
+  minutesShow((info && info.default) || "agy");
+}
+// Server-wide (shared by every viewer): the server echoes the choice back.
+function minutesShow(choice) {
   if ([...recMinutesSelect.options].some(o => o.value === choice)) recMinutesSelect.value = choice;
 }
-recMinutesSelect.addEventListener("change", () => {
-  try { localStorage.setItem("kvmMinutes", recMinutesSelect.value); } catch (e) {}
-});
 function minutesActive(item) { return !!(item.minutes && MINUTES_ACTIVE.includes(item.minutes.state)); }
 function minutesLink(label, href) {
   const a = document.createElement("a"); a.textContent = label; a.href = href;
@@ -1489,8 +1498,9 @@ function renderMeetingNotes(msg) {
 }
 
 // --- Live captions (Target HDMI audio -> kvm-ai-hub on the LAN) ---
-// The server owns the hub link (ref-counted across viewers) and sends plain
-// caption text, so this works for WAN viewers too. CC on/off is remembered.
+// CC is one switch on the server, shared by every viewer: this page only
+// shows it and asks the server to flip it. The server sends plain caption
+// text, so this works for WAN viewers too.
 const ccBtn = document.getElementById("btnCC");
 const ccOverlay = document.getElementById("ccOverlay");
 const ccLines = document.getElementById("ccLines");
@@ -1498,14 +1508,14 @@ const ccNotice = document.getElementById("ccNotice");
 const ccStateEl = document.getElementById("ccState");
 const ccHistoryList = document.getElementById("ccHistoryList");
 const ccSizeSelect = document.getElementById("ccSize");
+const ccPill = document.getElementById("lsCcPill");
 const CC_STATE_TEXT = {off:"字幕关闭", connecting:"正在连接 kvm-ai-hub…", live:"字幕识别中",
   offline:"kvm-ai-hub 离线，正在重连", unavailable:"字幕不可用"};
 const ccHistory = [];
 const ccSeen = new Set();
 let ccRecent = [];
 let ccAvailable = false, ccState = "off", ccHideTimer = null;
-let ccOn = false;
-try { ccOn = localStorage.getItem("kvmCaptions") === "1"; } catch (e) {}
+let ccOn = false, ccSince = null;
 try { ccSizeSelect.value = localStorage.getItem("kvmCaptionSize") || "24"; } catch (e) { ccSizeSelect.value = "24"; }
 if (!ccSizeSelect.value) ccSizeSelect.value = "24";
 ccOverlay.style.setProperty("--cc-size", ccSizeSelect.value + "px");
@@ -1515,21 +1525,35 @@ ccSizeSelect.addEventListener("change", () => {
   ccShowOverlay();
 });
 function ccRenderButton() {
+  const live = ccOn && ccState === "live", wait = ccOn && !live;
+  const word = !ccAvailable ? "不可用" : live ? "开" : !ccOn ? "关" : ccState === "offline" ? "离线" : "连接中";
   ccBtn.setAttribute("aria-pressed", String(ccOn));
-  ccBtn.classList.toggle("active", ccOn && ccState === "live");
-  ccBtn.classList.toggle("cc-offline", ccOn && (ccState === "offline" || ccState === "connecting"));
+  ccBtn.classList.toggle("cc-on", live);
+  ccBtn.classList.toggle("cc-wait", wait);
+  ccBtn.querySelector(".cc-word").textContent = word;
+  ccBtn.setAttribute("aria-label", "CC " + word);
+  const since = ccSince ? " · " + ccClock(ccSince * 1000).slice(0, 5) + " 起" : "";
+  ccPill.textContent = !ccAvailable ? "字幕不可用" : live ? "● 字幕开启" + since
+    : ccOn ? "● 字幕" + word + since : "字幕关闭";
+  ccPill.className = "cc-pill" + (live ? " on" : wait ? " wait" : "");
 }
 function ccConfigure(info) {
   ccAvailable = !!(info && info.available);
   ccBtn.disabled = !ccAvailable;
-  ccBtn.textContent = ccAvailable ? "CC" : "CC 不可用";
-  ccBtn.title = ccAvailable ? "实时字幕（Target HDMI 声音 → kvm-ai-hub）"
+  ccBtn.title = ccAvailable ? "实时字幕（Target HDMI 声音 → kvm-ai-hub）· 所有观看者共用一个开关"
     : "字幕不可用：" + ((info && info.reason) || "服务端未提供");
-  if (!ccAvailable) { ccSetState("unavailable", (info && info.reason) || ""); return; }
-  if (ccOn) { ccSetState("connecting", ""); wsSend({type:"captions", on:true}); lsSync(); }
-  else ccSetState("off", "");
+  if (!ccAvailable) { ccOn = false; ccSetState("unavailable", (info && info.reason) || ""); return; }
+  ccApply(!!info.on, info.since || null);
+  ccSetState(ccOn ? "connecting" : "off", "");
 }
-function ccSetState(state, detail) {
+// The server's switch: on/off and since when (epoch seconds).
+function ccApply(on, since) {
+  const wasOn = ccOn;
+  ccOn = on; ccSince = on ? since : null;
+  if (wasOn && !on) { ccRecent = []; ccLines.replaceChildren(); ccOverlay.classList.add("idle"); meetingCheck(); }
+}
+function ccSetState(state, detail, on, since) {
+  if (on !== undefined) ccApply(!!on, since || null);
   ccState = state;
   ccStateEl.textContent = (CC_STATE_TEXT[state] || state) + (detail ? "：" + detail : "");
   let notice = "";
@@ -1541,11 +1565,9 @@ function ccSetState(state, detail) {
   if (notice) ccShowOverlay(); else if (!ccLines.childElementCount) ccOverlay.classList.add("idle");
 }
 function ccToggle(on) {
-  ccOn = on;
-  try { localStorage.setItem("kvmCaptions", on ? "1" : "0"); } catch (e) {}
+  // Shown at once; every viewer (this one too) then gets the server's state.
   wsSend({type:"captions", on});
-  if (on) lsSync();
-  if (!on) { ccRecent = []; ccLines.replaceChildren(); ccOverlay.classList.add("idle"); meetingCheck(); }
+  ccApply(on, on ? Date.now() / 1000 : null);
   ccSetState(on ? "connecting" : "off", "");
 }
 ccBtn.addEventListener("click", () => { if (ccAvailable) ccToggle(!ccOn); container.focus(); });
@@ -1714,8 +1736,8 @@ const lsMinutesLine = document.getElementById("lsMinutesLine");
 const LS_NAMES = {agy:"agy", codex:"codex", "mac-qwen":"Mac Qwen", none:"—"};
 let lsLast = null;
 function lsSummarizer() { return recMinutesSelect.value; }
-function lsSync() { if (ccOn) wsSend({type:"live_summary", action:"set_summarizer", summarizer:lsSummarizer()}); }
-recMinutesSelect.addEventListener("change", lsSync);
+recMinutesSelect.addEventListener("change", () =>
+  wsSend({type:"live_summary", action:"set_summarizer", summarizer:lsSummarizer()}));
 lsInterval.addEventListener("change", () =>
   wsSend({type:"live_summary", action:"set_interval", minutes:parseInt(lsInterval.value, 10), summarizer:lsSummarizer()}));
 // With CC off this asks for the (final) summary of the meeting that just ended.
@@ -1773,9 +1795,9 @@ function lsRender() {
   else if (m.state === "failed") meta = (m.final ? "最终总结失败：" : "总结失败：") + (m.error || "unknown");
   else if (m.data && m.at && m.final) meta = "最终总结（" + hhmm(m.at) + " 完成 · " + (LS_NAMES[m.used] || m.used) + "）";
   else if (m.data && m.at) meta = lsAgo(m.at) + "更新 · " + (LS_NAMES[m.used] || m.used);
-  else meta = finals ? "已收到 " + finals + " 句字幕，尚未总结"
-    : ccOn ? "会议已开始，等待字幕…" : "打开 CC 后，这里会定期显示会议要点。";
-  if (m.summarizer === "off") meta += " · 「会议记录」为关闭，不自动总结";
+  else meta = finals ? "已收到 " + finals + " 句字幕，尚未总结" + (m.interval ? "" : "（点「立即总结」或设置「自动」）")
+    : ccOn ? "会议已开始，等待字幕…" : "打开 CC 后，用「立即总结」或「自动」生成会议要点。";
+  if (m.summarizer === "off") meta += " · 「会议记录」为关闭，不生成要点";
   if (m.session && m.session.closed) meta = "上一场会议 · " + meta;
   lsMeta.textContent = meta;
   lsRun.disabled = m.state === "running" || !!(m.session && m.session.closed);
@@ -1818,6 +1840,7 @@ function onLiveSummary(msg) {
   lsLast = msg;
   if (msg.notice) showHint("会议要点：" + msg.notice);
   if (msg.interval !== undefined) lsInterval.value = String(msg.interval);
+  if (msg.summarizer) minutesShow(msg.summarizer);
   lsRender();
   if (isNew && (sidePanel.hidden || pointsSection.classList.contains("folded"))) ccBtn.classList.add("has-badge");
   meetingCheck();
@@ -3089,7 +3112,7 @@ class WebViewerServer:
         return {item["id"]: self._minutes.view(item["id"]) for item in items}
 
     def _set_captions(self, state: dict, on: bool):
-        """Join/leave the shared caption feed (the hub link is ref-counted)."""
+        """Join/leave the shared caption feed (does not switch CC itself)."""
         if on and state["captions_queue"] is None:
             state["captions_queue"] = self._captions.subscribe()
             state["captions_event"].set()
@@ -3106,7 +3129,7 @@ class WebViewerServer:
                 pass
 
     async def _send_captions(self, ws, state: dict):
-        """Forward caption text / hub state to this client while CC is on."""
+        """Forward this client's caption feed (CC state, captions, meeting points)."""
         while True:
             q = state["captions_queue"]
             if q is None:
@@ -3210,9 +3233,10 @@ class WebViewerServer:
                                     "height": self._config.capture_height},
                 "capture_status": self._hw.get_capture().get_cached_info(),
                 "captions": {"available": self._captions.available,
-                             "reason": self._captions.reason},
+                             "reason": self._captions.reason,
+                             "on": self._captions.on, "since": self._captions.on_since},
                 "minutes": {"enabled": self._minutes.enabled,
-                            "default": self._minutes.default},
+                            "default": self._meeting.summarizer},
                 "server_recording": {"available": True, "fps": list(FPS_CHOICES),
                                      "state": self._server_recording_state()},
             }))
@@ -3241,11 +3265,12 @@ class WebViewerServer:
                     "on": not wan,
                 }))
 
-            # Live meeting points - including a final summary made after CC
-            # was turned off - go to every authenticated viewer.
+            # Every authenticated viewer follows the server-wide CC switch:
+            # its feed starts with the CC state, recent captions (while on)
+            # and the meeting points. Joining or leaving never changes CC.
             self._viewers.add(ws)
             if self._captions.available:
-                await ws.send(json.dumps(self._meeting.message(), ensure_ascii=False))
+                self._set_captions(state, True)
 
             tasks = [
                 asyncio.create_task(self._send_capture_status(ws)),
@@ -3958,10 +3983,10 @@ class WebViewerServer:
                     continue
 
                 if ev_type == "captions":
+                    # The CC button switches CC for every viewer; the new
+                    # state reaches all of them through their caption feeds.
                     try:
-                        self._set_captions(state, bool(ev.get("on")))
-                        if not ev.get("on"):
-                            await ws.send(json.dumps({"type":"captions_state", "state":"off", "detail":""}))
+                        self._meeting.set_cc(bool(ev.get("on")))
                     except ValueError as exc:
                         await ws.send(json.dumps({"type":"captions_state", "state":"unavailable", "detail":str(exc)}))
                     continue

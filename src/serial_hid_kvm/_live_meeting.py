@@ -1,17 +1,25 @@
 """In-meeting live points from final captions, plus minutes without a recording.
 
-A *CC session* starts when a viewer turns CC on and lasts while captions are
-wanted.  The hub link itself stops after the caption LINGER, but the session
-stays resumable for ``RESUME_WINDOW`` (page reloads, a KVM restart): turning
-CC on again within that window continues the same session.  After the
-window - or on 「新会议」 - the session is finalized.
+CC is one server-wide switch shared by every viewer and kept across restarts
+(``settings.json``).  Viewers connecting, disconnecting or reconnecting never
+change it; only a viewer's CC button does - or, after ``IDLE_OFF`` with no
+viewer at all, the server (captions stop, nothing is summarized).
+
+A *CC session* starts when CC is turned on.  After CC is turned off it stays
+resumable for ``RESUME_WINDOW`` (a KVM restart, CC toggled by mistake):
+turning CC on again within that window continues the same session.  After
+the window - or on 「新会议」 - the session is finalized, without any AI call.
+
+AI summaries run only when a viewer asked for them: every N minutes after
+the auto interval was set (it resets to off for every new session), or on
+「立即总结」.  Meeting minutes from captions only on 「生成会议记录」.
 
 Files (``recording_dir/.captions/``):
 
     <YYYYmmdd-HHMMSS>-<id>.jsonl        final captions, one JSON per line
     <YYYYmmdd-HHMMSS>-<id>/meta.json    session state
     <YYYYmmdd-HHMMSS>-<id>/summary-NNNN.json   every live summary
-    settings.json                        auto-summary interval
+    settings.json                        CC switch, auto-summary interval, summarizer
 
 Live summaries reuse the minutes summarizers (agy guard / codex sandbox /
 Mac Qwen) with a lighter schema.  Only the target's HDMI audio is captioned,
@@ -106,58 +114,83 @@ def live_markdown(data, at_ms, used):
 class LiveMeeting:
     RESUME_WINDOW = 600
     TICK = 15.0
-    AUTO_MINUTES_MIN_FINALS = 10
-    AUTO_MINUTES_MIN_SPAN = 120
+    IDLE_OFF = 2 * 3600   # CC on with no viewer at all for this long -> CC off
 
-    def __init__(self, root, captions, minutes, interval=5):
+    def __init__(self, root, captions, minutes, interval=0):
         self.root = Path(root).expanduser().resolve()
         self.folder = self.root / ".captions"
         self.captions = captions
         self.minutes = minutes
-        self.summarizer = minutes.default if minutes.default in SUMMARIZERS + ("off",) else "agy"
-        self.interval = self._load_interval(interval)
+        settings = self._load_settings()
+        summarizer = settings.get("summarizer", minutes.default)
+        self.summarizer = summarizer if summarizer in SUMMARIZERS + ("off",) else "agy"
+        interval = settings.get("interval", interval)
+        self.interval = interval if interval in INTERVALS else 0
+        self.cc_saved = settings.get("cc") is True  # restored by loop()
         self.session = None
         self.last = None        # latest summary record
         self.previous = None    # the one before (client highlights changes)
         self.state, self.error = "idle", ""
         self.running = False
-        self.running_final = False
+        self.running_final = False  # the running summary was asked for with CC off
+        self.failed_final = False
         self.stopping = False
         self.last_run = 0.0
-        self._idle = None          # asyncio.Event, set while no summary runs
-        self._final_task = None
         self._tasks = set()
         self._closed = None        # (meta, last, previous) of the last finalized session
-        # Viewer hook: publish(message) to every authenticated viewer, CC on
-        # or not, so a final summary is visible after CC was turned off.
+        # Viewer hook: publish(message) to every authenticated viewer.
         self.publish = None
         self.runners = {"agy": self._run_agy, "codex": self._run_codex, "mac-qwen": self._run_mac}
         captions.on_final = self.add_final
         captions.on_subscribe = self.on_subscribe
-        captions.on_stopped = self.on_captions_stopped
 
-    # -- settings ----------------------------------------------------------
-    def _load_interval(self, default):
+    # -- settings (server-wide, shared by every viewer) --------------------
+    def _load_settings(self):
         try:
-            value = int(json.loads((self.folder / "settings.json").read_text(encoding="utf-8"))["interval"])
-        except (OSError, ValueError, KeyError, TypeError):
-            value = int(default or 0)
-        return value if value in INTERVALS else 5
+            data = json.loads((self.folder / "settings.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _store_settings(self):
+        atomic_text(self.folder / "settings.json", json.dumps(
+            {"cc": self.cc_saved, "interval": self.interval, "summarizer": self.summarizer}))
 
     def set_interval(self, minutes):
         minutes = int(minutes)
         if minutes not in INTERVALS:
             raise ValueError("自动总结间隔只能是 0/3/5/10 分钟")
+        if minutes and not self.interval:
+            self.last_run = time.monotonic()  # first automatic summary one interval from now
         self.interval = minutes
-        atomic_text(self.folder / "settings.json", json.dumps({"interval": minutes}))
+        self._store_settings()
         self.broadcast()
 
     def set_summarizer(self, name):
         if name in SUMMARIZERS + ("off",) and name != self.summarizer:
             self.summarizer = name
+            self._store_settings()
             if self.session:
                 self._save(summarizer=name)
             self.broadcast()
+
+    def set_cc(self, on, reason="viewer"):
+        """CC on/off for every viewer. Turning it off never starts a summary."""
+        on = bool(on)
+        changed = self.captions.set_on(on)  # ValueError when captions are unavailable
+        if on:
+            self.ensure_session()
+        if changed or self.cc_saved != on:
+            self.cc_saved = on
+            self._store_settings()
+            logger.info("CC %s (%s)", "on" if on else "off", reason)
+        self.broadcast()
+        return changed
+
+    def restore_cc(self):
+        """At startup: CC was on before the restart -> on again."""
+        if self.cc_saved and self.captions.available:
+            self.set_cc(True, "restored after restart")
 
     # -- session files -----------------------------------------------------
     def _paths(self, sid):
@@ -194,6 +227,9 @@ class LiveMeeting:
         self.last_run = time.monotonic()
         if self.session is None:
             sid = datetime.now(JST).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+            if self.interval:  # every new meeting starts with automatic summaries off
+                self.interval = 0
+                self._store_settings()
             self.session = {"id": sid, "started_at": now, "last_at": 0, "seen_at": now, "finals": 0,
                             "first_at": None, "recorded": False, "finalized": None, "summaries": 0,
                             "summarized_finals": 0, "summarizer": self.summarizer}
@@ -230,7 +266,8 @@ class LiveMeeting:
                     continue
 
     def on_subscribe(self):
-        self.ensure_session()
+        if self.captions.active:
+            self.ensure_session()
         return [self.message()]
 
     def add_final(self, item):
@@ -248,25 +285,12 @@ class LiveMeeting:
             self._save(recorded=True)
 
     def _finalize(self, meta):
+        """Archive a session. No AI call: minutes only come from 生成会议记录."""
         meta["finalized"] = time.time()
-        span = (meta.get("last_at") or 0) - (meta.get("first_at") or meta.get("started_at") or 0)
-        # Skip when the meeting was recorded (its minutes come from the
-        # recording) or when 生成会议记录 already covered every caption.
-        covered = meta.get("minutes_job") and meta.get("minutes_finals", -1) >= meta.get("finals", 0)
-        auto = (not meta.get("recorded") and not covered and meta.get("finals", 0) >= self.AUTO_MINUTES_MIN_FINALS
-                and span >= self.AUTO_MINUTES_MIN_SPAN and meta.get("summarizer", self.summarizer) in SUMMARIZERS)
-        if auto:
-            try:
-                job = self.minutes.enqueue_captions(self._paths(meta["id"])[0], "meeting-" + meta["id"],
-                                                    meta.get("summarizer"), meta.get("started_at"), meta["id"])
-                meta["minutes_job"] = job and job["id"]
-                meta["minutes_finals"] = meta.get("finals", 0)
-            except Exception:
-                logger.exception("Caption minutes could not be queued (%s)", meta["id"])
+        meta.pop("final_pending", None)  # left by older versions
         atomic_text(self._paths(meta["id"])[2], json.dumps(meta, ensure_ascii=False, indent=1))
         self._closed = None  # recomputed from disk: the newest finalized session
-        logger.info("Caption session finalized: %s (%s finals%s)", meta["id"], meta.get("finals", 0),
-                    ", minutes queued" if meta.get("minutes_job") else "")
+        logger.info("Caption session finalized: %s (%s finals)", meta["id"], meta.get("finals", 0))
 
     def new_meeting(self):
         if self.session is not None:
@@ -319,15 +343,14 @@ class LiveMeeting:
             minutes = self.minutes.view(session["minutes_job"])
         final = self.running_final if state == "running" else bool(record.get("final"))
         if state == "failed":
-            final = bool(session.get("final_pending"))
+            final = self.failed_final
         return {"type": "live_summary", "state": state, "error": error, "final": final,
                 "data": record.get("data"), "previous": (previous or {}).get("data"),
                 "at": record.get("at"), "used": record.get("used"), "interval": self.interval,
                 "summarizer": self.summarizer, "minutes": minutes,
                 "session": {"id": session.get("id"), "started_at": session.get("started_at"),
                             "finals": session.get("finals", 0), "recorded": session.get("recorded", False),
-                            "summarized": session.get("summarized_finals", 0),
-                            "final_pending": bool(session.get("final_pending")), "closed": closed}
+                            "summarized": session.get("summarized_finals", 0), "closed": closed}
                 if session else None}
 
     def broadcast(self):
@@ -337,90 +360,25 @@ class LiveMeeting:
         else:
             self.captions.broadcast(message)
 
-    # -- final summary when CC is turned off --------------------------------
+    # -- manual summary ------------------------------------------------------
     def _unsummarized(self, session):
         return session is not None and session["finals"] > session.get("summarized_finals", 0)
 
-    def on_captions_stopped(self):
-        """Last viewer left (LINGER + hub flush done): summarize what is left."""
-        session = self.session
-        if not self._unsummarized(session) or self.summarizer not in SUMMARIZERS:
-            return
-        self._save(final_pending=True)
-        if not self.stopping:  # during shutdown the restart picks it up
-            self.start_final()
-
-    def start_final(self):
-        if self._final_task is None or self._final_task.done():
-            self._final_task = asyncio.ensure_future(self.run_final())
-            self._tasks.add(self._final_task)
-            self._final_task.add_done_callback(self._tasks.discard)
-        return self._final_task
-
-    async def run_final(self):
-        """Final summary in the background, independent of any viewer.
-
-        Waits for a summary already running, then runs again while captions
-        are still unsummarized. If CC is reopened meanwhile, the result is
-        kept as an ordinary summary and the meeting simply continues.
-        """
-        while not self.stopping:
-            session = self.session
-            if session is None or not session.get("final_pending"):
-                return
-            if (self.captions.active or not self._unsummarized(session)
-                    or self.summarizer not in SUMMARIZERS):
-                # Done, or CC is back on and the meeting simply continues.
-                self._save(final_pending=False)
-                self.broadcast()
-                return
-            if self.running:
-                await self._idle_event().wait()
-                continue
-            try:
-                ok = await self.run(manual=True, final=True)
-            except ValueError:
-                ok = False
-            if not ok:
-                return  # failed: final_pending stays; 重试 or the next start retries
-
     def request_run(self):
-        """立即总结 / 重试 from a viewer. With CC off it is (again) the final summary."""
+        """立即总结 / 重试 from a viewer - the only summary outside the auto interval."""
         if self.running:
             raise ValueError("上一次总结还在进行中")
         if self.session is None:
             raise ValueError("这次会议已经收尾；打开 CC 开始新的会议")
-        if not self.captions.active:
-            if not self._unsummarized(self.session):
-                raise ValueError("没有新的字幕需要总结")
-            if self.summarizer not in SUMMARIZERS:
-                raise ValueError("会议记录设置为关闭，不生成要点")
-            self._save(final_pending=True)
-            return self.start_final()
-        task = asyncio.ensure_future(self.run(manual=True))
+        if not self.captions.active and not self._unsummarized(self.session):
+            raise ValueError("没有新的字幕需要总结")
+        if self.summarizer not in SUMMARIZERS:
+            raise ValueError("会议记录设置为关闭，不生成要点")
+        # With CC off this summarizes what is left of the meeting (shown as 最终总结).
+        task = asyncio.ensure_future(self.run(manual=True, final=not self.captions.active))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
-
-    def _idle_event(self):
-        if self._idle is None:
-            self._idle = asyncio.Event()
-            if not self.running:
-                self._idle.set()
-        return self._idle
-
-    def resume_pending(self):
-        """At startup: continue a final summary interrupted by a restart."""
-        if self.session is not None:
-            return None
-        for meta in reversed(self._metas()):
-            if not meta.get("finalized") and meta.get("final_pending"):
-                self.session = meta
-                self._resume()
-                self.last_run = time.monotonic()
-                logger.info("Resuming final summary for caption session %s", meta["id"])
-                return self.start_final()
-        return None
 
     def due(self, now=None):
         session = self.session
@@ -431,12 +389,15 @@ class LiveMeeting:
         return (now or time.monotonic()) - self.last_run >= self.interval * 60
 
     async def tick(self):
+        if self.captions.active and self.captions.viewers_idle() > self.IDLE_OFF:
+            # Forgotten CC: stop the captions only - nothing is summarized.
+            self.set_cc(False, f"no viewer for {self.IDLE_OFF // 3600} h")
         if self.session is not None:
             if self.captions.active:
                 self.session["seen_at"] = time.time()
             elif time.time() - max(self.session.get("last_at", 0), self.session.get("seen_at", 0)) > self.RESUME_WINDOW:
-                if self.running or (self._final_task is not None and not self._final_task.done()):
-                    return  # finalize after the final summary has finished
+                if self.running:
+                    return  # finalize after the manual summary has finished
                 self._finalize(self.session)
                 self.session = None
                 self.broadcast()
@@ -446,9 +407,9 @@ class LiveMeeting:
 
     async def loop(self):
         try:
-            self.resume_pending()
+            self.restore_cc()
         except Exception:
-            logger.exception("Could not resume a pending final summary")
+            logger.exception("Could not restore CC after the restart")
         while True:
             await asyncio.sleep(self.TICK)
             try:
@@ -460,11 +421,6 @@ class LiveMeeting:
 
     def _set_running(self, running, final=False):
         self.running, self.running_final = running, final and running
-        idle = self._idle_event()
-        if running:
-            idle.clear()
-        else:
-            idle.set()
 
     async def run(self, manual=False, final=False):
         """One summary pass; skipped while another is running (no concurrency)."""
@@ -493,11 +449,12 @@ class LiveMeeting:
             return False
         except Exception as exc:
             self._set_running(False)
+            self.failed_final = final
             self.state, self.error = "failed", str(exc)[:800]
             logger.warning("Live summary failed (%s): %s", session["id"], exc)
             self.broadcast()
             return False
-        # Reopening CC while the final summary ran turns it into an ordinary one.
+        # Reopening CC while it ran turns a final summary into an ordinary one.
         is_final = final and not self.captions.active
         number = session.get("summaries", 0) + 1
         record = {"n": number, "at": int(time.time() * 1000), "used": used, "finals": finals, "data": data,
