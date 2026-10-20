@@ -109,3 +109,54 @@ class RecordingSessions:
                     pass
             self._save(manifest, state)
             return source, self.directory / state["filename"]
+
+    # ---- server-side recordings (written by ffmpeg, not uploaded) ----------
+    SERVER_SOURCE = "source.mkv"
+
+    def create_server(self, session, filename, options=None):
+        """New session whose source is recorded on the server (MKV)."""
+        with self.lock:
+            manifest, _ = self._paths(session)
+            if manifest.exists():
+                raise ValueError("Recording session already exists")
+            if not isinstance(filename, str) or not re.fullmatch(r"recording-[A-Za-z0-9._-]+", filename):
+                raise ValueError("Invalid recording filename")
+            manifest.parent.mkdir(parents=True, exist_ok=False)
+            state = {"id":session, "filename":filename + "-" + session[:8] + ".mp4",
+                     "source":self.SERVER_SOURCE, "server":True, "next":0, "size":0,
+                     "finished":False, "started_epoch":time.time()}
+            options = options if isinstance(options, dict) else {}
+            if options.get("minutes") in ("agy", "codex", "mac-qwen", "off"):
+                state["minutes"] = options["minutes"]
+            for key in ("fps", "audio_source"):
+                if options.get(key) is not None:
+                    state[key] = options[key]
+            self._save(manifest, state)
+            return state, manifest.with_name(self.SERVER_SOURCE)
+
+    def finish_server(self, session, duration_seconds=None, recorded_end_at=None):
+        with self.lock:
+            manifest, _ = self._paths(session)
+            state = json.loads(manifest.read_text(encoding="utf-8"))
+            source = manifest.with_name(state.get("source", self.SERVER_SOURCE))
+            size = source.stat().st_size if source.exists() else 0
+            if not size:
+                raise ValueError("Recording is empty")
+            state.update(finished=True, size=size)
+            if recorded_end_at is not None and duration_seconds is not None:
+                state["recorded_end_at"] = recorded_end_at
+                state["duration_seconds"] = duration_seconds
+            self._save(manifest, state)
+            return source, self.directory / state["filename"]
+
+    def unfinished_server_sessions(self):
+        """Server sessions left open by a crash or restart (oldest first)."""
+        found = []
+        for manifest in sorted((self.directory / ".recording-sessions").glob("*/session.json")):
+            try:
+                state = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if state.get("server") and not state.get("finished"):
+                found.append(state["id"])
+        return found

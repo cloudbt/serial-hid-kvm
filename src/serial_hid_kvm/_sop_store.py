@@ -177,7 +177,7 @@ class SopStore:
                 if manifest:
                     for field in ("recorded_end_at", "duration_seconds"):
                         media[field] = manifest.get(field)
-                    media["source"] = f".recording-sessions/{session}/source.webm"
+                    media["source"] = f".recording-sessions/{session}/{manifest.get('source', 'source.webm')}"
                 payload = json.dumps(media, ensure_ascii=False)
                 prior = db.execute("SELECT media FROM recordings WHERE id=?", (key,)).fetchone()
                 if prior:

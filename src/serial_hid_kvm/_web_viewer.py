@@ -20,6 +20,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import socket
 import ssl
 import time
@@ -39,6 +40,7 @@ from ._web_recording_audio import RECORDING_AUDIO_CONTROLS_JS
 from ._recording import convert_recording
 from ._recording_session import RecordingSessions
 from ._recording_library import RecordingLibrary
+from ._server_recorder import FPS_CHOICES, SOURCES as SERVER_REC_SOURCES, ServerRecorder
 from ._sop_http import SopService, local_request
 from ._sop_viewer import install_sop_viewer
 from .hid_protocol import (
@@ -270,6 +272,8 @@ body.tb-hidden #container{height:100%}
 .record-controls>button{border-radius:5px 0 0 5px!important}
 #recordMenu>summary{background:#0f3460;border:1px solid #1a1a5e;border-radius:0 5px 5px 0;padding:3px 7px}
 .record-panel{width:min(420px,calc(100vw - 24px));left:auto;right:0}
+.record-panel.server-mode .browser-only{display:none!important}
+.record-panel .rec-server-note{font-size:12px;opacity:.8;margin:4px 0 8px}
 .rec-channel{border-top:1px solid #384b66;padding-top:10px;margin-top:12px}
 .rec-channel[hidden]{display:none}
 .rec-channel-title{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px}
@@ -430,27 +434,35 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
     <button id="btnRec" title="Start or stop recording">&#x23fa; Record</button>
     <details class="tool-group" id="recordMenu">
       <summary title="Recording settings and recent files" aria-label="Recording settings and recent files">▾</summary>
-      <div class="tool-panel record-panel"><h3>Recording audio</h3>
+      <div class="tool-panel record-panel"><h3>Recording</h3>
+        <label>方式 <select id="recMode" aria-label="Recording method" title="录制中不能切换">
+          <option value="server">服务端录制（推荐）</option><option value="browser">浏览器录制（备用）</option>
+        </select></label>
+        <label id="recFpsRow">帧率 <select id="recFps" aria-label="Recording frame rate">
+          <option value="15">15 fps</option><option value="30">30 fps</option>
+        </select></label>
+        <p class="rec-server-note" id="recServerNote">服务端录制：服务器直接录 Host 的麦克风（EarPods）和 Target 的 HDMI 声音。关闭或刷新页面不会停止录制，最长 3 小时。</p>
+        <h3>Recording audio</h3>
         <label>Source <select id="recAudioSource" aria-label="Recording audio source" title="Stop recording before changing audio source">
           <option value="mic">Host Mic</option><option value="hdmi">Target HDMI</option><option value="mix">Host Mic + Target HDMI</option><option value="none">No audio</option>
         </select></label>
-        <section class="rec-channel" id="recMicChannel" aria-label="Host Mic recording input">
+        <section class="rec-channel browser-only" id="recMicChannel" aria-label="Host Mic recording input">
           <div class="rec-channel-title"><strong>Host Mic · My voice</strong><span id="recMicState" class="rec-channel-state">Not checked</span></div>
           <label>Device <select id="recAudioDevice" aria-label="Host microphone device"></select></label>
           <div class="rec-channel-title"><label for="recMicGain">Record volume <output id="recMicGainValue">100%</output></label><label class="rec-mute"><input id="recMicMute" type="checkbox">Mute</label></div>
           <input id="recMicGain" type="range" min="0" max="200" value="100" aria-label="Host Mic recording volume">
           <div class="rec-level">Input level <meter id="recAudioLevel" aria-label="Host Mic input level" min="0" max="1" value="0"></meter></div>
         </section>
-        <section class="rec-channel" id="recHdmiChannel" aria-label="Target HDMI recording input" hidden>
+        <section class="rec-channel browser-only" id="recHdmiChannel" aria-label="Target HDMI recording input" hidden>
           <div class="rec-channel-title"><strong>Target HDMI · Meeting audio</strong><span id="recHdmiState" class="rec-channel-state">Not checked</span></div>
           <label>Device <select id="recHdmiDevice" aria-label="Target HDMI audio device"></select></label>
           <div class="rec-channel-title"><label for="recHdmiGain">Record volume <output id="recHdmiGainValue">100%</output></label><label class="rec-mute"><input id="recHdmiMute" type="checkbox">Mute</label></div>
           <input id="recHdmiGain" type="range" min="0" max="200" value="100" aria-label="Target HDMI recording volume">
           <div class="rec-level">Input level <meter id="recHdmiLevel" aria-label="Target HDMI input level" min="0" max="1" value="0"></meter></div>
         </section>
-        <div class="panel-row"><button id="btnRecInputs" title="Allow audio access and refresh devices">Inputs</button>
+        <div class="panel-row browser-only"><button id="btnRecInputs" title="Allow audio access and refresh devices">Inputs</button>
         <button id="btnRecCheck" title="Check audio without recording">Check audio</button></div>
-        <p id="recAudioStatus" role="status"></p>
+        <p id="recAudioStatus" class="browser-only" role="status"></p>
         <label id="recMinutesRow">会议记录 <select id="recMinutes" aria-label="Meeting minutes summarizer" title="录制结束后自动转写并生成会议记录（录制开始时确定）。敏感会议请选 Mac Qwen 或关闭：内容不出局域网。">
           <option value="agy">agy（默认）</option><option value="codex">codex</option><option value="mac-qwen">Mac Qwen（局域网内）</option><option value="off">关闭</option>
         </select></label>
@@ -707,6 +719,7 @@ function connect() {
           adaptiveAck = !!msg.adaptive;
           minutesConfigure(msg.minutes || null);
           ccConfigure(msg.captions || null);
+          srecConfigure(msg.server_recording || null);
           if (msg.webrtc === false) {
             const b = document.getElementById("btnRtc");
             b.disabled = true;
@@ -754,9 +767,20 @@ function connect() {
             if (toolbarHidden) showHint("WebRTC error: " + msg.error);
           }
         }
+        else if (msg.type === "rec_session_saved" && msg.server) {
+          recordingFileSaved(msg);
+          statusEl.textContent = "Recording saved · MP4 processing";
+        }
         else if (["rec_session_ready", "rec_ack", "rec_session_saved", "rec_session_error"].includes(msg.type)) {
           recordingUploadEvent(msg);
         }
+        else if (msg.type === "srec_state") { srecApply(msg); }
+        else if (msg.type === "srec_error") {
+          srecBusy = false;
+          statusEl.textContent = "录制没有开始：" + msg.error;
+          showHint(statusEl.textContent);
+        }
+        else if (msg.type === "srec_notice") { statusEl.textContent = msg.message; showHint(msg.message); }
         else if (msg.type === "caption") { ccCaption(msg); }
         else if (msg.type === "captions_state") { ccSetState(msg.state, msg.detail || ""); }
         else if (msg.type === "live_summary") { onLiveSummary(msg); }
@@ -1818,7 +1842,7 @@ function meetingCheck() {
   let ignored = null;
   try { ignored = sessionStorage.getItem("kvmMeetingIgnored"); } catch (e) {}
   const now = Date.now();
-  const busy = recording || recFinishing || recStarting;
+  const busy = recording || recFinishing || recStarting || srecState.active || srecBusy;
   const show = ccOn && ccState === "live" && !busy && meetRunStart > 0 &&
     meetLastFinal - meetRunStart >= 120000 && now - meetLastFinal < 60000 && ignored !== meetingSessionId();
   if (meetingBar.hidden === show) { meetingBar.hidden = !show; updateLayout(); }
@@ -1826,7 +1850,7 @@ function meetingCheck() {
 setInterval(meetingCheck, 5000);
 document.getElementById("meetingBarRecord").addEventListener("click", () => {
   meetingBar.hidden = true; updateLayout();
-  startRecording(); container.focus();
+  toggleRecording(); container.focus();
 });
 document.getElementById("meetingBarIgnore").addEventListener("click", () => {
   try { sessionStorage.setItem("kvmMeetingIgnored", meetingSessionId()); } catch (e) {}
@@ -2176,9 +2200,97 @@ document.getElementById("btnRec").addEventListener("click", () => {
     recResumePending = false;
     document.getElementById("btnRec").textContent = "⏺ Record";
     statusEl.textContent = "Automatic recording resume cancelled";
-  } else if (recording) stopRecording(); else startRecording();
+  } else toggleRecording();
   container.focus();
 });
+
+// --- Server-side recording (default) ---
+// The server records capture + audio itself; this page only sends start/stop
+// and mirrors srec_state, which every viewer of this Target receives.
+let srecAvailable = false, srecState = {active:false}, srecBusy = false, srecTimer = null, srecBase = 0;
+const recModeSelect = document.getElementById("recMode");
+const recFpsSelect = document.getElementById("recFps");
+try {
+  const savedMode = localStorage.getItem("kvmRecMode");
+  if (savedMode === "server" || savedMode === "browser") recModeSelect.value = savedMode;
+  const savedFps = localStorage.getItem("kvmRecFps");
+  if (savedFps === "15" || savedFps === "30") recFpsSelect.value = savedFps;
+} catch (e) {}
+function recMode() { return srecAvailable && recModeSelect.value === "server" ? "server" : "browser"; }
+function applyRecMode() {
+  const server = recMode() === "server";
+  document.querySelector(".record-panel").classList.toggle("server-mode", server);
+  document.getElementById("recFpsRow").hidden = !server;
+  document.getElementById("recServerNote").hidden = !server;
+  recModeSelect.disabled = !srecAvailable || srecState.active || recording || recFinishing;
+  recFpsSelect.disabled = !!srecState.active;
+}
+recModeSelect.addEventListener("change", () => {
+  try { localStorage.setItem("kvmRecMode", recModeSelect.value); } catch (e) {}
+  applyRecMode();
+});
+recFpsSelect.addEventListener("change", () => {
+  try { localStorage.setItem("kvmRecFps", recFpsSelect.value); } catch (e) {}
+});
+function srecConfigure(cfg) {
+  srecAvailable = !!(cfg && cfg.available);
+  if (cfg && cfg.state) srecApply(cfg.state); else applyRecMode();
+}
+function srecTick() {
+  const s = Math.max(0, Math.floor((Date.now() - srecBase) / 1000));
+  const hh = Math.floor(s / 3600), mm = Math.floor(s / 60) % 60, ss = s % 60;
+  document.getElementById("btnRec").textContent = "■ Stop " + (hh ? hh + ":" : "") +
+    String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
+}
+function srecApply(st) {
+  srecState = st || {active:false};
+  srecBusy = false;
+  const btn = document.getElementById("btnRec");
+  clearInterval(srecTimer); srecTimer = null;
+  if (srecState.active) {
+    srecBase = Date.now() - (srecState.elapsed || 0) * 1000;
+    btn.disabled = !!srecState.starting;
+    btn.classList.add("recording");
+    if (srecState.starting) btn.textContent = "Starting…";
+    else { srecTick(); srecTimer = setInterval(srecTick, 500); }
+    recSourceSelect.disabled = true;
+    const warnings = srecState.warnings || [];
+    statusEl.textContent = "Server recording · " + (srecState.encoder || "") + " · " + (srecState.fps || "") + " fps" +
+      (warnings.length ? " · " + warnings.join("; ") : "");
+    if (warnings.length) showHint(warnings.join("; "));
+  } else if (!recording && !recFinishing && !recStarting) {
+    btn.disabled = false;
+    btn.classList.remove("recording");
+    btn.textContent = "⏺ Record";
+    recSourceSelect.disabled = false;
+  }
+  applyRecMode();
+  meetingCheck();
+}
+function toggleRecording() {
+  // A running server recording is stopped from any page, whatever its mode.
+  if (srecState.active || recMode() === "server") {
+    if (srecBusy || srecState.starting) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      statusEl.textContent = "Cannot record: not connected";
+      return;
+    }
+    const btn = document.getElementById("btnRec");
+    srecBusy = true;
+    btn.disabled = true;
+    if (srecState.active) {
+      btn.textContent = "Saving…";
+      wsSend({type:"srec_stop"});
+    } else {
+      btn.textContent = "Starting…";
+      const minutesSelect = document.getElementById("recMinutes");
+      wsSend({type:"srec_start", fps:Number(recFpsSelect.value), source:recSourceSelect.value,
+              minutes:minutesSelect && !minutesSelect.disabled ? minutesSelect.value : "off"});
+    }
+    return;
+  }
+  if (recording) stopRecording(); else startRecording();
+}
 
 // --- Toolbar show/hide hotkey (Ctrl+Alt+Enter) ---
 // The toolbar is visible by default.
@@ -2562,6 +2674,13 @@ class WebViewerServer:
         self._recording_sessions = RecordingSessions(config.recording_dir)
         self._recording_library = RecordingLibrary(config.recording_dir)
         self._session_exports: dict = {}
+        # Server-side recording (default): ffmpeg encodes the capture + audio,
+        # the browser only sends start/stop. It outlives viewer disconnects.
+        self._server_recorder = ServerRecorder(
+            hardware.get_capture, audio,
+            mic_name=getattr(config, "recording_mic", "EarPods") or "",
+            max_seconds=getattr(config, "recording_max_seconds", 3 * 3600),
+            on_stop=self._server_recording_stopped)
         self._sop = SopService(self)
         self._captions = CaptionService(
             audio, getattr(config, "ai_hub_url", ""), getattr(config, "ai_hub_key", None),
@@ -2619,6 +2738,10 @@ class WebViewerServer:
         await asyncio.to_thread(self._minutes.start)
         self._loop = asyncio.get_running_loop()
         self._meeting_task = asyncio.create_task(self._meeting.loop())
+        try:
+            await self._recover_server_recordings()
+        except Exception:
+            logger.exception("Recovering interrupted server recordings failed")
         scheme = "https" if ssl_ctx else "http"
         auth = " (password required)" if self._config.web_password else ""
         logger.info(f"Web viewer listening on {scheme}://{host}:{port}{auth}")
@@ -2648,6 +2771,11 @@ class WebViewerServer:
         return ctx
 
     async def stop(self):
+        if self._server_recorder.active:
+            # Close the file cleanly; the stop callback queues save/export,
+            # which the _recording_jobs gather below waits for.
+            await asyncio.to_thread(self._server_recorder.stop, "shutdown")
+            await asyncio.sleep(0)
         await asyncio.to_thread(self._sop.stop)
         await asyncio.to_thread(self._minutes.stop)
         self._meeting.stopping = True
@@ -2680,6 +2808,9 @@ class WebViewerServer:
                 except Exception as exc:
                     logger.warning("Recording export failed (%s): %s", path, exc)
                     message = {"type": "rec_export_error", "path": str(path), "error": str(exc), "session":session}
+                if ws is None:      # server recordings: every viewer shows the result
+                    self._broadcast(message)
+                    return
                 try:
                     await ws.send(json.dumps(message))
                 except Exception:
@@ -2819,6 +2950,94 @@ class WebViewerServer:
 
     def _publish_meeting(self, message):
         """Send live_summary to every viewer; callable from worker threads too."""
+        self._broadcast(message)
+
+    # ---- server-side recording ---------------------------------------------
+    def _server_recording_state(self):
+        state = self._server_recorder.status()
+        state.pop("path", None)
+        state["type"] = "srec_state"
+        return state
+
+    async def _start_server_recording(self, ev):
+        """Begin a server recording; every viewer sees the new state."""
+        fps = ev.get("fps", 15)
+        source = ev.get("source", "mix")
+        if fps not in FPS_CHOICES or source not in SERVER_REC_SOURCES:
+            raise ValueError("Invalid recording settings")
+        if self._server_recorder.active:
+            raise ValueError("A server recording is already running")
+        session = secrets.token_hex(16)
+        stamp = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%dT%H-%M-%S-%f")[:-3]
+        state, source_path = await asyncio.to_thread(
+            self._recording_sessions.create_server, session, f"recording-{stamp}-JST",
+            {"minutes": ev.get("minutes"), "fps": fps, "audio_source": source})
+        try:
+            await asyncio.to_thread(self._server_recorder.start, session, source_path, fps, source,
+                                    state["started_epoch"])
+        except Exception:
+            # Nothing usable was written: drop the empty session folder.
+            await asyncio.to_thread(shutil.rmtree, source_path.parent, True)
+            raise
+        self._meeting.note_recording()
+        self._captions.begin_recording(
+            session, self._recording_library.root / (Path(state["filename"]).stem + ".live.vtt"),
+            state["started_epoch"])
+        self._broadcast(self._server_recording_state())
+
+    def _server_recording_stopped(self, status):
+        """Recorder thread callback (manual stop, 3 h limit, disk full, error)."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+
+        def schedule():
+            task = loop.create_task(self._finish_server_recording(status))
+            self._recording_jobs.add(task)
+            task.add_done_callback(self._recording_jobs.discard)
+        loop.call_soon_threadsafe(schedule)
+
+    async def _finish_server_recording(self, status):
+        session = status.get("session")
+        self._captions.end_recording(session)
+        self._broadcast(self._server_recording_state())
+        reason = status.get("stopped_reason", "manual")
+        if reason in ("max_duration", "disk_full", "error"):
+            label = {"max_duration": "已达 3 小时上限，录制已自动停止",
+                     "disk_full": "磁盘空间不足，录制已自动停止",
+                     "error": "录制出错：" + str(status.get("error", ""))}[reason]
+            self._broadcast({"type": "srec_notice", "message": label})
+        try:
+            ended = datetime.now(timezone.utc)
+            source, destination = await asyncio.to_thread(
+                self._recording_sessions.finish_server, session, status.get("duration"), ended.isoformat())
+        except Exception as exc:
+            logger.warning("Server recording %s not saved: %s", session, exc)
+            self._broadcast({"type": "srec_notice", "message": "录制没有保存：" + str(exc)})
+            return
+        try:
+            await asyncio.to_thread(self._queue_minutes, session, source, destination)
+        except Exception:
+            logger.exception("Minutes queueing failed; recording was saved")
+        if self._sop.store:
+            try:
+                await asyncio.to_thread(self._sop.store.notice_saved, self._recording_library.identifier(destination.name))
+            except Exception:
+                logger.exception("SOP indexing deferred; recording was saved")
+        self._broadcast({"type": "rec_session_saved", "session": session, "server": True,
+                         "path": str(destination),
+                         "recording_id": self._recording_library.identifier(destination.name)})
+        self._session_exports[session] = self._export_recording(source, None, destination, session)
+        logger.info("Server recording saved: %s -> %s", session, destination)
+
+    async def _recover_server_recordings(self):
+        """Finish server sessions a crash or restart left open (file kept as is)."""
+        for session in await asyncio.to_thread(self._recording_sessions.unfinished_server_sessions):
+            logger.warning("Recovering interrupted server recording %s", session)
+            await self._finish_server_recording({"session": session, "stopped_reason": "recovered"})
+
+    def _broadcast(self, message):
+        """Send a JSON message to every viewer; callable from worker threads too."""
         loop = self._loop
         if loop is None or loop.is_closed():
             return
@@ -2986,6 +3205,8 @@ class WebViewerServer:
                              "reason": self._captions.reason},
                 "minutes": {"enabled": self._minutes.enabled,
                             "default": self._minutes.default},
+                "server_recording": {"available": True, "fps": list(FPS_CHOICES),
+                                     "state": self._server_recording_state()},
             }))
 
             # Tell the client which capture device the server uses, so direct
@@ -3772,6 +3993,24 @@ class WebViewerServer:
                     except (OSError, ValueError, KeyError, TypeError) as exc:
                         result = {"type":"minutes_action", "id":ev.get("id"), "error":str(exc)}
                     await ws.send(json.dumps(result, ensure_ascii=False))
+                    continue
+
+                if ev_type == "srec_start":
+                    try:
+                        await self._start_server_recording(ev)
+                    except Exception as exc:
+                        logger.warning("Server recording did not start: %s", exc)
+                        await ws.send(json.dumps({"type": "srec_error", "error": str(exc)}, ensure_ascii=False))
+                        await ws.send(json.dumps(self._server_recording_state()))
+                    continue
+
+                if ev_type == "srec_stop":
+                    if self._server_recorder.active:
+                        # The recorder thread finishes the file and calls
+                        # _server_recording_stopped, which saves and exports it.
+                        await asyncio.to_thread(self._server_recorder.stop, "manual")
+                    else:
+                        await ws.send(json.dumps(self._server_recording_state()))
                     continue
 
                 if ev_type == "rec_session_start":

@@ -522,6 +522,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recording-dir", type=str, metavar="DIR",
                         help="Directory for browser screen recordings"
                              " (default: ~/Videos)")
+    parser.add_argument("--recording-mic", type=str, metavar="NAME",
+                        help="Host microphone for server-side recording: part of its"
+                             " device name (default: EarPods; empty = none)")
+    parser.add_argument("--recording-max-seconds", type=int, metavar="SEC",
+                        help="Stop a server-side recording automatically after SEC"
+                             " seconds (default: 10800 = 3 h)")
     parser.add_argument("--sop-project-dir", type=str, metavar="DIR",
                         help="Local SOP project root (auto beside knowledge/sops; 'off' disables)")
     parser.add_argument("--sop-agy-executable", type=str, metavar="FILE",

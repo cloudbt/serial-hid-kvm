@@ -71,6 +71,10 @@ class Config:
         # Screen recording (web viewer): directory where the browser-recorded
         # .webm files are saved by the server.  Default: ~/Videos.
         self.recording_dir: str = str(Path.home() / "Videos")
+        # Server-side recording: Host microphone (part of its device name,
+        # WASAPI preferred; empty = no mic) and the automatic stop limit.
+        self.recording_mic: str = "EarPods"
+        self.recording_max_seconds: int = 3 * 3600
         # Empty: enable only for a recordings/ folder beside knowledge/sops/.
         # 'off' disables the local SOP service explicitly.
         self.sop_project_dir: str = ""
@@ -127,7 +131,7 @@ _FILE_KEYS = {
     "web_enabled", "web_host", "web_port", "web_fps", "web_quality",
     "web_password", "web_tls_cert", "web_tls_key",
     "webrtc_fps", "webrtc_bitrate",
-    "recording_dir",
+    "recording_dir", "recording_mic", "recording_max_seconds",
     "sop_project_dir", "sop_agy_executable", "sop_segment_seconds", "sop_agy_timeout",
     "ai_hub_url", "ai_hub_key", "captions_enabled", "captions_language", "captions_summary_interval",
     "minutes_enabled", "minutes_summarizer", "minutes_fallback_order", "minutes_timeout",
@@ -215,6 +219,8 @@ _ENV_MAP = {
     "SHKVM_WEBRTC_FPS": "webrtc_fps",
     "SHKVM_WEBRTC_BITRATE": "webrtc_bitrate",
     "SHKVM_RECORDING_DIR": "recording_dir",
+    "SHKVM_RECORDING_MIC": "recording_mic",
+    "SHKVM_RECORDING_MAX_SECONDS": "recording_max_seconds",
     "SHKVM_SOP_PROJECT_DIR": "sop_project_dir",
     "SHKVM_SOP_AGY_EXECUTABLE": "sop_agy_executable",
     "SHKVM_SOP_SEGMENT_SECONDS": "sop_segment_seconds",
@@ -290,6 +296,8 @@ def _apply_args(config: Config, args):
         "webrtc_fps": "webrtc_fps",
         "webrtc_bitrate": "webrtc_bitrate",
         "recording_dir": "recording_dir",
+        "recording_mic": "recording_mic",
+        "recording_max_seconds": "recording_max_seconds",
         "sop_project_dir": "sop_project_dir",
         "sop_agy_executable": "sop_agy_executable",
         "sop_segment_seconds": "sop_segment_seconds",

@@ -46,11 +46,11 @@ class RecordingLibrary:
                 if not data['finished']:
                     continue
                 destination = self.confined(self.root / data['filename'])
-                source = self.confined(manifest.with_name('source.webm'))
+                source = self.confined(manifest.with_name(data.get('source', 'source.webm')))
                 key = self.identifier(destination.name)
                 path = destination if destination.is_file() else source
                 state = 'MP4 ready' if path == destination else self.source_state(source)
-                name = destination.name if path == destination else destination.with_suffix('.webm').name
+                name = destination.name if path == destination else destination.with_suffix(source.suffix).name
                 entries[key] = self.entry(key, path, name, state)
                 entries[key]['session_id'] = data.get('id')
             except (OSError, ValueError, KeyError, TypeError):
@@ -60,7 +60,8 @@ class RecordingLibrary:
     @staticmethod
     def source_state(source):
         log = source.with_suffix('.conversion.log')
-        return 'MP4 conversion failed · WebM available' if log.exists() else 'WebM saved · MP4 processing'
+        kind = 'MKV' if source.suffix.lower() == '.mkv' else 'WebM'
+        return f'MP4 conversion failed · {kind} available' if log.exists() else f'{kind} saved · MP4 processing'
 
     def entry(self, key, path, name, state):
         stat = path.stat()
@@ -87,7 +88,7 @@ class RecordingLibrary:
             result.append(item)
         return result
 
-    MEDIA = ('.mp4', '.webm')
+    MEDIA = ('.mp4', '.webm', '.mkv')
     # Minutes/transcript side files, served as text beside the recordings.
     TEXT = ('.md', '.srt', '.vtt')
 

@@ -585,6 +585,19 @@ Direct mode is per-browser and not persisted; the viewer always starts in normal
 
 ### Screen Recording
 
+**Server-side recording (default).** The Record button asks the server to record:
+ffmpeg encodes the capture (15 or 30 fps, AMD `h264_amf` or `libx264`) with the Host
+microphone (`--recording-mic`, default `EarPods`) and the Target HDMI audio mixed into
+one AAC track. The browser only sends start/stop, so a tab never buffers video. The
+recording continues when every viewer closes; any viewer of that Target sees its
+state and can stop it. It stops by itself after `--recording-max-seconds` (default
+3 h) or when less than 2 GB of disk is free. The source is `.recording-sessions/<id>/
+source.mkv` (readable after a crash; unfinished sessions are saved on the next start)
+and is remuxed to MP4 without re-encoding. Captions (`.live.vtt`), meeting minutes and
+the SOP library work as before. Requires `ffmpeg` on PATH.
+
+The browser recorder below remains as a fallback (Recording ▾ → 方式 → 浏览器录制).
+
 Recording audio is selected independently of speaker playback:
 
 - **Host Mic** (default): the microphone on the computer running this browser.
