@@ -93,7 +93,7 @@ class KvmClient:
 
         retryable = method in {
             "ping", "capture_frame", "get_device_info", "list_capture_devices",
-            "get_timing",
+            "get_timing", "recording_status", "captions_status", "meeting_points",
         }
         with self._lock:
             for attempt in range(2 if retryable else 1):
@@ -208,3 +208,35 @@ class KvmClient:
 
     def set_capture_resolution(self, width: int, height: int) -> dict:
         return self.call("set_capture_resolution", {"width": width, "height": height})
+
+    # -- web viewer: server recording, CC, meeting points ----------------------
+    # Need the server's web viewer (--web). Only meeting_summarize and
+    # meeting_minutes call AI; long work runs in the background on the server.
+
+    def recording_status(self) -> dict:
+        return self.call("recording_status")
+
+    def recording_start(self, fps: int = 15, source: str = "mix", minutes: str = "off") -> dict:
+        """Start a server recording; minutes: agy | codex | mac-qwen | off."""
+        return self.call("recording_start", {"fps": fps, "source": source, "minutes": minutes})
+
+    def recording_stop(self) -> dict:
+        """Stop it; saving continues in the background (see recording_status()["last"])."""
+        return self.call("recording_stop")
+
+    def captions_status(self) -> dict:
+        return self.call("captions_status")
+
+    def captions_set(self, on: bool) -> dict:
+        return self.call("captions_set", {"on": on})
+
+    def meeting_points(self) -> dict:
+        return self.call("meeting_points")
+
+    def meeting_summarize(self) -> dict:
+        """Like 立即总结: starts an AI summary, poll meeting_points() for it."""
+        return self.call("meeting_summarize")
+
+    def meeting_minutes(self) -> dict:
+        """Like 生成会议记录: queues AI minutes from this meeting's captions."""
+        return self.call("meeting_minutes")

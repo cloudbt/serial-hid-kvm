@@ -126,17 +126,66 @@ class ApiDispatcher:
     def __init__(self, hardware: KvmHardware, config: Config):
         self._hw = hardware
         self._config = config
+        # WebViewerServer on the same event loop (None without --web): owns
+        # server recording, CC and the meeting points.
+        self.web = None
 
     async def dispatch(self, method: str, params: dict) -> dict:
         """Execute *method* with *params* and return a result dict.
 
-        Blocking hardware calls are run in the default executor.
+        Blocking hardware calls are run in the default executor; web viewer
+        calls (``_web_*``) run on the event loop they share with the viewers.
         """
         loop = asyncio.get_running_loop()
+        handler = getattr(self, f"_web_{method}", None)
+        if handler is not None:
+            if self.web is None:
+                raise ValueError(f"{method} needs the web viewer (--web)")
+            result = handler(self.web, params)
+            return await result if asyncio.iscoroutine(result) else result
         handler = getattr(self, f"_do_{method}", None)
         if handler is None:
             raise ValueError(f"Unknown method: {method}")
         return await loop.run_in_executor(None, handler, params)
+
+    # -- web viewer handlers (event loop) ------------------------------------
+    # Recording, CC and meeting points for agents: the same paths as the
+    # viewer's buttons. Only meeting_summarize / meeting_minutes call AI.
+
+    @staticmethod
+    def _web_recording_status(web, params: dict) -> dict:
+        return web.api_recording_status()
+
+    @staticmethod
+    def _web_recording_start(web, params: dict):
+        return web.api_recording_start(fps=int(params.get("fps", 15)), source=params.get("source", "mix"),
+                                       minutes=params.get("minutes", "off"))
+
+    @staticmethod
+    def _web_recording_stop(web, params: dict):
+        return web.api_recording_stop()
+
+    @staticmethod
+    def _web_captions_status(web, params: dict) -> dict:
+        return web.api_captions_status()
+
+    @staticmethod
+    def _web_captions_set(web, params: dict) -> dict:
+        if not isinstance(params.get("on"), bool):
+            raise ValueError("captions_set needs on: true or false")
+        return web.api_captions_set(params["on"])
+
+    @staticmethod
+    def _web_meeting_points(web, params: dict) -> dict:
+        return web.api_meeting_points()
+
+    @staticmethod
+    def _web_meeting_summarize(web, params: dict) -> dict:
+        return web.api_meeting_summarize()
+
+    @staticmethod
+    def _web_meeting_minutes(web, params: dict):
+        return web.api_meeting_minutes()
 
     # -- method handlers (run in thread pool) --------------------------------
 
@@ -976,6 +1025,7 @@ def _run_headless(hardware: KvmHardware, config: Config,
     if config.web_enabled:
         from ._web_viewer import WebViewerServer
         web = WebViewerServer(hardware, config, audio=audio_capture)
+        dispatcher.web = web
 
     async def serve():
         if tcp is not None:
@@ -1031,6 +1081,7 @@ def _run_with_preview(hardware: KvmHardware, config: Config,
     if config.web_enabled:
         from ._web_viewer import WebViewerServer
         web = WebViewerServer(hardware, config, audio=audio_capture)
+        dispatcher.web = web
 
     # Audio playback for preview window
     audio_playback = None
