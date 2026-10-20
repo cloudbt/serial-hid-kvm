@@ -840,14 +840,36 @@ The user edits the draft, provides environment, reviewer and a resolution for
 each uncertainty, then publishes. Publication creates immutable version text,
 the current SOP, and a small project `.agents/skills/` entry pinned to the
 reviewed version. Publication can resume after a partial filesystem failure.
+Skills display the exact SOP name. Invocation names and folders use a portable
+title slug, for example `Create DataSpider User` → `create-dataspider-user`.
+Name collisions get a numeric suffix without replacing another skill. Titles
+without Latin letters/digits retain an internal ID, with their full title still
+shown in the UI. Existing published entries migrate on startup; versions stay
+unchanged and old discovery entries are retired as `RENAMED.md`.
 Withdrawing disables skill discovery without removing recordings or history.
 Actual target execution and its authorization remain separate from publication.
+
+Published SOP details offer **使用反馈** and **创建修订草稿**. Each feedback
+records the exact version, work date, environment, scenario/ticket, and observed
+result (issue, suggestion, or scoped success). A success applies only to that
+case/version; a new version starts with no recorded successes. Publishing is
+human review of the instructions, not a claim of complete real-world validation.
+The skill also reads the generated `knowledge/sops/<sop-id>/feedback.md`.
+
+Create a revision from the current active version to edit reviewed text without
+calling agy again. Open feedback becomes required review questions. Save the
+changes and their evidence, then publish a new immutable version. Feedback is
+marked **incorporated, awaiting use verification**, with its review resolution
+and destination version retained. Late feedback remains open. Older drafts
+cannot overwrite a version published since their base; start a new revision
+from the current version and reconcile the changes. Issues affecting the next
+operation require checking the current situation before continuing that step.
 
 Files under the selected project:
 
 - `knowledge/sops/<sop-id>/drafts/`: unreviewed text; exclude this from Git.
 - `knowledge/sops/<sop-id>/versions/vNNNN.md` and `sop.md`: reviewed versions.
-- `.agents/skills/targetpc2-<sop-id>/SKILL.md`: published skill entry.
+- `.agents/skills/<sop-name>/SKILL.md` and `agents/openai.yaml`: skill entry and SOP display name.
 - `.local/sop-library/library.sqlite`: authoritative metadata, queue and events.
 - `.local/video-analysis/<job-id>/`: local evidence, prompts/results and logs.
 - `knowledge/recordings-index.md`: generated index; edit metadata through the UI.

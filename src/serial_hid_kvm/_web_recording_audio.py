@@ -21,7 +21,9 @@ const recEl = id => document.getElementById(id);
 // user-confirmed :9330 suffixes, then the distinct Windows device names.
 const recHdmiDefaults = {
   target1:{suffix:"057af2", name:/\(USB3 Digital Audio\)/i, label:"Target1 HDMI"},
-  target2:{suffix:"d0c23b", name:/\(3-\s*USB3 Digital Audio\)/i, label:"Target2 HDMI"}
+  target2:{suffix:"d0c23b", name:/\(3-\s*USB3 Digital Audio\)/i, label:"Target2 HDMI"},
+  // No confirmed :9330 suffix yet; the Windows name is unique (checked via PnP container).
+  target3:{suffix:null, name:/\(4-\s*USB3 Digital Audio\)/i, label:"Target3 HDMI"}
 };
 function recordingDeviceTarget(device) {
   const suffix = device.deviceId.slice(-6).toLowerCase();

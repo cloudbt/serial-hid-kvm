@@ -10,7 +10,10 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 import uuid
+
+import yaml
 
 JST = timezone(timedelta(hours=9))
 ACTIVE_JOBS = ("queued", "running", "waiting_media")
@@ -47,6 +50,16 @@ def text_value(value, limit=300):
     if not isinstance(value, str) or len(value) > limit or "\x00" in value:
         raise ValueError("文字内容无效或过长")
     return value.strip()
+
+
+def skill_slug(title, fallback):
+    """Portable invocation name; the full SOP title is kept as display_name."""
+    title = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
+    name = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    name = name[:63].rstrip("-") or fallback
+    if name.upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+        name = "sop-" + name
+    return name
 
 
 def recording_time(name):
@@ -113,8 +126,20 @@ class SopStore:
                 id INTEGER PRIMARY KEY, at TEXT NOT NULL, subject TEXT NOT NULL,
                 action TEXT NOT NULL, detail TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS worker_lock(id INTEGER PRIMARY KEY, owner TEXT, expires REAL);
+              CREATE TABLE IF NOT EXISTS feedback(
+                id TEXT PRIMARY KEY, sop_id TEXT NOT NULL, version_id TEXT NOT NULL,
+                created_at TEXT NOT NULL, run_date TEXT NOT NULL, kind TEXT NOT NULL,
+                environment TEXT NOT NULL, scenario TEXT NOT NULL, note TEXT NOT NULL,
+                status TEXT NOT NULL, revision_job_id TEXT, incorporated_version TEXT,
+                resolution TEXT DEFAULT '');
             """)
+            if "skill_name" not in {row[1] for row in db.execute("PRAGMA table_info(sops)")}:
+                db.execute("ALTER TABLE sops ADD COLUMN skill_name TEXT")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS sop_skill_names ON sops(skill_name) WHERE skill_name IS NOT NULL")
+            if "base_version" not in {row[1] for row in db.execute("PRAGMA table_info(jobs)")}:
+                db.execute("ALTER TABLE jobs ADD COLUMN base_version TEXT")
         self.recover_publications()
+        self.sync_skills()
 
     @contextmanager
     def connect(self):
@@ -198,6 +223,8 @@ class SopStore:
                     WHERE l.recording_id=? AND v.status='published' ORDER BY v.number DESC""", (row["id"],))]
                 records.append(item)
             sops = [dict(row) for row in db.execute("""SELECT s.*,v.number,v.reviewed_at,
+                    (SELECT count(*) FROM feedback f WHERE f.sop_id=s.id AND f.status='open') AS open_feedback,
+                    (SELECT count(*) FROM feedback f WHERE f.version_id=s.current_version AND f.kind='success') AS successful_runs,
                     (SELECT count(DISTINCT recording_id) FROM links JOIN versions vv ON version_id=vv.id WHERE vv.sop_id=s.id) AS recordings
                     FROM sops s LEFT JOIN versions v ON s.current_version=v.id ORDER BY v.reviewed_at DESC""")]
         # Only IDs / relative paths are exposed; signed URLs are freshly issued.
@@ -291,7 +318,8 @@ class SopStore:
             if sop_id and not db.execute("SELECT id FROM sops WHERE id=? AND active=1", (sop_id,)).fetchone():
                 raise ValueError("所选 SOP 不存在或已停用")
             job = uuid.uuid4().hex
-            db.execute("INSERT INTO jobs(id,recording_id,sop_id,status,updated_at) VALUES(?,?,?,'queued',?)", (job, key, sop_id, utcnow()))
+            base = db.execute("SELECT current_version FROM sops WHERE id=?", (sop_id,)).fetchone() if sop_id else None
+            db.execute("INSERT INTO jobs(id,recording_id,sop_id,status,updated_at,base_version) VALUES(?,?,?,'queued',?,?)", (job, key, sop_id, utcnow(), base[0] if base else None))
             db.execute("UPDATE recordings SET choice='generate',prompt_seen=1 WHERE id=?", (key,))
             self.event(db, job, "queued", key)
         self.export_index()
@@ -379,6 +407,9 @@ class SopStore:
             result = {"job": job, "recording": recording, "data": json.loads(job["data"]) if job["data"] else None,
                       "markdown": job["draft"] or "", "resolutions": json.loads(job["resolutions"])}
             result['display_steps']=display_steps(result['markdown'])
+            with self.connect() as db:
+                published = db.execute("SELECT id FROM versions WHERE job_id=? AND status='published'", (job_id,)).fetchone()
+            result['published_version'] = published[0] if published else None
             if job["sop_id"]:
                 with self.connect() as db:
                     prior = db.execute("SELECT v.markdown FROM sops s JOIN versions v ON s.current_version=v.id WHERE s.id=?", (job["sop_id"],)).fetchone()
@@ -393,6 +424,114 @@ class SopStore:
             row = db.execute("SELECT recording_id FROM links WHERE version_id=? LIMIT 1", (version_id,)).fetchone()
         recording = self.get_recording(row["recording_id"])
         return {"version": dict(version), "recording": recording, "markdown": version["markdown"], "data": json.loads(self.job(version["job_id"])["data"]),"display_steps":display_steps(version['markdown'])}
+
+    def feedback(self, version_id):
+        with self.connect() as db:
+            version = db.execute("SELECT * FROM versions WHERE id=? AND status='published'", (version_id,)).fetchone()
+            if not version:
+                raise ValueError("SOP 版本不存在")
+            rows = [dict(row) for row in db.execute("""SELECT f.*,v.number AS source_number,iv.number AS incorporated_number
+                FROM feedback f JOIN versions v ON f.version_id=v.id
+                LEFT JOIN versions iv ON f.incorporated_version=iv.id
+                WHERE f.sop_id=? ORDER BY f.created_at DESC""", (version['sop_id'],))]
+        return {"version_id": version_id, "version": version['number'], "sop_id": version['sop_id'], "items": rows}
+
+    def add_feedback(self, version_id, kind, run_date, environment, scenario, note):
+        if kind not in ('issue', 'suggestion', 'success'):
+            raise ValueError("请选择遇到问题、改进建议或本次成功")
+        date.fromisoformat(run_date)
+        environment, scenario, note = text_value(environment,120), text_value(scenario,300), text_value(note,3000)
+        if not environment or not scenario or not note:
+            raise ValueError("请填写本次环境、作业范围及结果或问题依据；不要填写密码")
+        key = uuid.uuid4().hex
+        with self.connect() as db:
+            version = db.execute("SELECT sop_id FROM versions WHERE id=? AND status='published'", (version_id,)).fetchone()
+            if not version:
+                raise ValueError("SOP 版本不存在")
+            db.execute("""INSERT INTO feedback(id,sop_id,version_id,created_at,run_date,kind,environment,scenario,note,status)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""", (key,version['sop_id'],version_id,utcnow(),run_date,kind,environment,scenario,note,'recorded' if kind=='success' else 'open'))
+            self.event(db,key,'usage_feedback',version_id)
+        self.export_feedback(version['sop_id'])
+        return key
+
+    def create_revision(self, version_id):
+        """Manual refinement from reviewed text; never submit another AI analysis."""
+        with self.connect() as db:
+            version = db.execute("SELECT * FROM versions WHERE id=? AND status='published'", (version_id,)).fetchone()
+            if not version:
+                raise ValueError("SOP 版本不存在")
+            sop = db.execute("SELECT * FROM sops WHERE id=?", (version['sop_id'],)).fetchone()
+            if not sop['active'] or sop['current_version'] != version_id:
+                raise ValueError("请从当前启用版本创建修订草稿")
+            existing = db.execute("SELECT id FROM jobs WHERE sop_id=? AND base_version=? AND status='review' ORDER BY rowid DESC LIMIT 1", (sop['id'],version_id)).fetchone()
+            if existing:
+                return existing['id']
+            source = db.execute("SELECT * FROM jobs WHERE id=?", (version['job_id'],)).fetchone()
+            if db.execute("SELECT id FROM jobs WHERE recording_id=? AND status IN ('queued','running','waiting_media')",(source['recording_id'],)).fetchone():
+                raise ValueError("来源录像已有分析任务，请先完成或取消")
+            items = db.execute("SELECT * FROM feedback WHERE sop_id=? AND status='open' ORDER BY created_at", (sop['id'],)).fetchall()
+            data = json.loads(source['data'])
+            data['feedback_ids'] = [f['id'] for f in items]
+            data['uncertainties'] = [f"使用反馈（{f['run_date']} / {f['environment']} / {f['scenario']}）：{f['note']}" for f in items]
+            data['uncertainties'].append('逐项核对本次修订的依据、适用范围、停止条件与需要再次验证的内容。')
+            draft = version['markdown'].split('\n## 人工核对记录\n',1)[0]
+            draft = re.sub(r'^- 状态：.*$', '- 状态：修订草稿，待人工核对', draft, count=1, flags=re.MULTILINE)
+            draft += f"\n\n## 本次修订\n\n基于 v{version['number']}；仅在有依据时修改，保留来源及未覆盖场景。\n"
+            for question in data['uncertainties']:
+                draft += '\n- '+question+'\n'
+            job = uuid.uuid4().hex
+            db.execute("""INSERT INTO jobs(id,recording_id,sop_id,status,updated_at,data,draft,base_version)
+                VALUES(?,?,?,'review',?,?,?,?)""", (job,source['recording_id'],sop['id'],utcnow(),json.dumps(data,ensure_ascii=False),draft,version_id))
+            for item in items:
+                db.execute("UPDATE feedback SET revision_job_id=? WHERE id=?",(job,item['id']))
+            self.event(db,job,'revision_created',version_id)
+        atomic_text(self.draft_path(self.job(job)),draft)
+        self.export_index()
+        return job
+
+    def incorporate_reviewed_feedback(self, version_id, resolutions):
+        """Associate reviewed late feedback without rewriting published text."""
+        if not isinstance(resolutions, dict) or not resolutions:
+            raise ValueError("请提供反馈及其核对说明")
+        answers = {text_value(key, 80): text_value(value, 2000) for key, value in resolutions.items()}
+        if any(not key or not value for key, value in answers.items()):
+            raise ValueError("反馈与核对说明不能为空")
+        with self.connect() as db:
+            version = db.execute("SELECT * FROM versions WHERE id=? AND status='published'", (version_id,)).fetchone()
+            if not version:
+                raise ValueError("SOP 版本不存在")
+            sop = db.execute("SELECT * FROM sops WHERE id=?", (version['sop_id'],)).fetchone()
+            if sop['current_version'] != version_id:
+                raise ValueError("只能关联当前已发布版本")
+            for key in answers:
+                item = db.execute("SELECT * FROM feedback WHERE id=?", (key,)).fetchone()
+                if not item or item['sop_id'] != sop['id'] or item['status'] != 'open':
+                    raise ValueError("反馈不是本 SOP 的待处理项")
+            for key, answer in answers.items():
+                db.execute("UPDATE feedback SET status='incorporated',incorporated_version=?,resolution=? WHERE id=?", (version_id,answer,key))
+                self.event(db,key,'feedback_incorporated_after_review',version_id)
+        self.export_feedback(sop['id'])
+
+    def export_feedback(self, sop_id):
+        with self.connect() as db:
+            sop = db.execute("SELECT * FROM sops WHERE id=?", (sop_id,)).fetchone()
+        if not sop or not sop['current_version']:
+            return
+        history = self.feedback(sop['current_version'])['items']
+        lines = ['# '+sop['title']+'：使用反馈与改进记录','',
+                 '由资料库生成，请通过“使用反馈”维护。一次成功仅证明当次版本、环境和作业范围的结果；发布和纳入修订均不等于已完成再次验证。',
+                 '未覆盖场景仍需确认；影响当前操作的问题先停止相关步骤。反馈不授予创建用户、权限变更或提交报告的授权。','']
+        kinds = {'issue':'遇到问题','suggestion':'改进建议','success':'本次成功'}
+        for item in history:
+            status = '待处理' if item['status']=='open' else (f"已纳入 v{item['incorporated_number']}，待使用核验" if item['status']=='incorporated' else '当次结果已记录')
+            lines += [f"## {item['run_date']} · v{item['source_number']} · {kinds[item['kind']]} · {status}", '',
+                      '- 环境：'+item['environment'],'- 作业范围：'+item['scenario'],'- 记录：'+item['note']]
+            if item['resolution']:
+                lines += ['- 修订说明：'+item['resolution']]
+            lines += ['']
+        if not history:
+            lines += ['尚无实机使用记录；按当次申请和当前画面逐步核验。','']
+        atomic_text(confined(self.root,self.root/sop['slug']/'feedback.md'),'\n'.join(lines))
 
     def publish(self, job_id, reviewer):
         reviewer = text_value(reviewer, 80)
@@ -413,6 +552,10 @@ class SopStore:
         sop_id = job["sop_id"] or "sop-"+job_id[:12]
         reviewed = utcnow()
         with self.connect() as db:
+            if job['sop_id'] and job['base_version']:
+                current = db.execute("SELECT current_version FROM sops WHERE id=?",(job['sop_id'],)).fetchone()
+                if not current or current[0] != job['base_version']:
+                    raise ValueError("此草稿基于旧版本，请先核对并重新合并最新修改")
             db.execute("INSERT OR IGNORE INTO sops(id,title,slug) VALUES(?,?,?)", (sop_id, recording["title"], sop_id))
             number = db.execute("SELECT COALESCE(max(number),0)+1 FROM versions WHERE sop_id=?", (sop_id,)).fetchone()[0]
             version_id = uuid.uuid4().hex
@@ -439,16 +582,92 @@ class SopStore:
                 raise ValueError("历史版本内容冲突，未覆盖")
             atomic_text(destination, version["markdown"])
             atomic_text(folder / "sop.md", version["markdown"])
-            skill_name = "targetpc2-" + sop["slug"]
-            skill_folder = confined(self.project / ".agents" / "skills", self.project / ".agents" / "skills" / skill_name)
-            relative = destination.relative_to(self.project).as_posix()
-            skill = f"---\nname: {skill_name}\ndescription: {json.dumps('在 TargetPC2 按已核对 SOP 完成'+sop['title']+'；当用户请求这一具体作业时使用。', ensure_ascii=False)}\n---\n\n读取 [SOP v{version['number']}](../../../{relative})。\n\n按本次输入确认目标、环境与授权范围，历史参数不作为默认值。通过项目绑定的 MCP 操作 Target；根据当前截图定位，每次保存或提交后核验实际结果。录像与 SOP 只提供流程，不授予新的执行权限。遇到未覆盖的差异或不确定结果时暂停并记录，不盲目重试。\n"
-            atomic_text(skill_folder / "SKILL.md", skill)
+            self.write_skill(db, sop, version)
             db.execute("UPDATE versions SET status='published' WHERE id=?", (version_id,))
             db.execute("UPDATE sops SET current_version=?,active=1 WHERE id=?", (version_id,sop["id"]))
             db.execute("UPDATE jobs SET status='published',updated_at=? WHERE id=?", (utcnow(),version["job_id"]))
+            revision = db.execute("SELECT data,resolutions FROM jobs WHERE id=?",(version['job_id'],)).fetchone()
+            for i, key in enumerate(json.loads(revision['data']).get('feedback_ids',[])):
+                db.execute("UPDATE feedback SET status='incorporated',incorporated_version=?,resolution=? WHERE id=? AND revision_job_id=? AND status='open'",
+                           (version_id,json.loads(revision['resolutions']).get(str(i),''),key,version['job_id']))
             self.event(db, version_id, "published", f"v{version['number']}")
         self.export_index()
+        self.export_feedback(sop['id'])
+
+    def skill_folder(self, name):
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) or len(name) > 64:
+            raise ValueError("Skill 名称无效")
+        root = self.project / ".agents" / "skills"
+        return confined(root, root / name)
+
+    def owns_skill(self, path, sop):
+        if not path.is_file():
+            return False
+        text = path.read_text(encoding="utf-8")
+        match = re.match(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", text, re.DOTALL)
+        if not match:
+            return False
+        try:
+            metadata = yaml.safe_load(match[1])
+        except yaml.YAMLError:
+            return False
+        if not isinstance(metadata, dict):
+            return False
+        owner = metadata.get("metadata")
+        if isinstance(owner, dict) and owner.get("sop_id") == sop["id"]:
+            return True
+        return (path.parent.name == "targetpc2-" + sop["slug"]
+                and metadata.get("name") == path.parent.name
+                and f"../../../knowledge/sops/{sop['slug']}/versions/" in text)
+
+    def write_skill(self, db, sop, version):
+        """Create a named skill, preserving unrelated UI/policy metadata."""
+        name = sop["skill_name"]
+        if name:
+            folder = self.skill_folder(name)
+            if folder.exists() and not self.owns_skill(folder / "SKILL.md", sop) and not self.owns_skill(folder / "WITHDRAWN.md", sop):
+                raise ValueError("Skill 目录已被其他内容占用，未覆盖")
+        else:
+            base = skill_slug(sop["title"], sop["slug"])
+            name, suffix = base, 1
+            while True:
+                folder = self.skill_folder(name)
+                occupied = db.execute("SELECT id FROM sops WHERE skill_name=? AND id<>?", (name, sop["id"])).fetchone()
+                if not occupied and (not folder.exists() or self.owns_skill(folder / "SKILL.md", sop)):
+                    break
+                suffix += 1
+                ending = f"-{suffix}"
+                name = base[:63-len(ending)].rstrip("-") + ending
+            db.execute("UPDATE sops SET skill_name=? WHERE id=?", (name, sop["id"]))
+        legacy = self.skill_folder("targetpc2-" + sop["slug"])
+        interface_path = folder / "agents" / "openai.yaml"
+        source = interface_path if interface_path.is_file() else legacy / "agents" / "openai.yaml"
+        settings = yaml.safe_load(source.read_text(encoding="utf-8")) if source.is_file() else {}
+        if settings is None:
+            settings = {}
+        if not isinstance(settings, dict) or not isinstance(settings.get("interface", {}), dict):
+            raise ValueError("Skill UI 配置格式无效，未覆盖")
+        display_token = "SOP_DISPLAY_NAME_" + uuid.uuid4().hex
+        settings.setdefault("interface", {})["display_name"] = display_token
+        relative = (self.root / sop["slug"] / "versions" / f"v{version['number']:04d}.md").relative_to(self.project).as_posix()
+        skill = f"---\nname: {name}\ndescription: {json.dumps('在 TargetPC2 按已核对 SOP 完成 '+sop['title']+'；当用户请求这一具体作业时使用。', ensure_ascii=False)}\nmetadata:\n  sop_id: {json.dumps(sop['id'])}\n---\n\n读取 [SOP v{version['number']}](../../../{relative}) 与 [使用反馈](../../../knowledge/sops/{sop['slug']}/feedback.md)。\n\n按本次输入确认目标、环境与授权范围，历史参数不作为默认值。通过项目绑定的 MCP 操作 Target；根据当前截图定位，每次保存或提交后核验实际结果。录像与 SOP 只提供流程，不授予新的执行权限。遇到未覆盖的差异、影响当前步骤的未解决反馈或不确定结果时，停止相关步骤并记录，不盲目重试。\n\n使用后通过资料库“使用反馈”记录所用版本、日期、环境、作业范围、结果与问题依据，勿记录凭据。一次成功仅限当次验证范围。改进时从当前版本创建修订草稿，按反馈修改并人工核对后发布新版本；不要直接覆盖历史版本。新发布只表示流程修订完成，仍需在后续使用中验证。\n"
+        # The owned entry lets a partially written UI configuration resume safely.
+        ui = yaml.safe_dump(settings, allow_unicode=True, sort_keys=False).replace(display_token, json.dumps(sop["title"], ensure_ascii=False))
+        atomic_text(folder / "SKILL.md", skill)
+        atomic_text(interface_path, ui)
+        if legacy != folder and self.owns_skill(legacy / "SKILL.md", sop):
+            os.replace(legacy / "SKILL.md", legacy / "RENAMED.md")
+
+    def sync_skills(self):
+        """Migrate already-published entries without publishing a new SOP version."""
+        with self.connect() as db:
+            sops = db.execute("SELECT * FROM sops WHERE active=1 AND current_version IS NOT NULL").fetchall()
+            for sop in sops:
+                version = db.execute("SELECT * FROM versions WHERE id=? AND status='published'", (sop["current_version"],)).fetchone()
+                if version:
+                    self.write_skill(db, sop, version)
+        for sop in sops:
+            self.export_feedback(sop['id'])
 
     def recover_publications(self):
         with self.connect() as db:
@@ -461,9 +680,10 @@ class SopStore:
             sop = db.execute("SELECT * FROM sops WHERE id=?", (sop_id,)).fetchone()
             if not sop:
                 raise ValueError("SOP 不存在")
-            skill = self.project / ".agents" / "skills" / ("targetpc2-"+sop["slug"]) / "SKILL.md"
-            if skill.exists():
-                os.replace(skill, skill.with_name("WITHDRAWN.md"))
+            for name in {sop["skill_name"], "targetpc2-" + sop["slug"]} - {None}:
+                skill = self.skill_folder(name) / "SKILL.md"
+                if self.owns_skill(skill, sop):
+                    os.replace(skill, skill.with_name("WITHDRAWN.md"))
             db.execute("UPDATE sops SET active=0 WHERE id=?", (sop_id,))
             self.event(db, sop_id, "withdrawn")
         self.export_index()
