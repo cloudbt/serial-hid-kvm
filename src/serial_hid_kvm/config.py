@@ -89,6 +89,12 @@ class Config:
         self.ai_hub_key: str | None = None
         self.captions_enabled: bool = True
         self.captions_language: str = "auto"
+        # The user's own voice in the live captions: host microphone (name
+        # substring; "" = recording_mic, "off" = HDMI audio only).
+        self.captions_mic: str = ""
+        # A caption after this many minutes without any starts a new
+        # meeting (CC left on between meetings); 0 = never.
+        self.captions_meeting_gap: int = 30
         # Live meeting points while CC is on: minutes between automatic
         # summaries (0 = off; 3/5/10).  Set from the viewer; every new
         # meeting starts with it off again.
@@ -135,6 +141,7 @@ _FILE_KEYS = {
     "recording_dir", "recording_mic", "recording_max_seconds",
     "sop_project_dir", "sop_agy_executable", "sop_segment_seconds", "sop_agy_timeout",
     "ai_hub_url", "ai_hub_key", "captions_enabled", "captions_language", "captions_summary_interval",
+    "captions_mic", "captions_meeting_gap",
     "minutes_enabled", "minutes_summarizer", "minutes_fallback_order", "minutes_timeout",
     "mac_llm_url", "mac_llm_key", "mac_llm_model", "codex_executable",
     "audio_device",
@@ -231,6 +238,8 @@ _ENV_MAP = {
     "SHKVM_CAPTIONS": "captions_enabled",
     "SHKVM_CAPTIONS_LANGUAGE": "captions_language",
     "SHKVM_CAPTIONS_SUMMARY_INTERVAL": "captions_summary_interval",
+    "SHKVM_CAPTIONS_MIC": "captions_mic",
+    "SHKVM_CAPTIONS_MEETING_GAP": "captions_meeting_gap",
     "SHKVM_MINUTES": "minutes_enabled",
     "SHKVM_MINUTES_SUMMARIZER": "minutes_summarizer",
     "SHKVM_MINUTES_FALLBACK_ORDER": "minutes_fallback_order",
@@ -308,6 +317,8 @@ def _apply_args(config: Config, args):
         "ai_hub_url": "ai_hub_url",
         "captions_language": "captions_language",
         "captions_summary_interval": "captions_summary_interval",
+        "captions_mic": "captions_mic",
+        "captions_meeting_gap": "captions_meeting_gap",
         "minutes_summarizer": "minutes_summarizer",
         "minutes_fallback_order": "minutes_fallback_order",
         "minutes_timeout": "minutes_timeout",

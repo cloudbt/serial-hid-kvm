@@ -12,6 +12,7 @@ import pytest
 
 from serial_hid_kvm import config as config_module
 from serial_hid_kvm import _minutes
+from serial_hid_kvm import _web_viewer
 
 DEAD_URL = "http://127.0.0.1:9"
 
@@ -32,5 +33,12 @@ def _isolated_environment(tmp_path_factory):
 
     patch.setattr(config_module.Config, "__init__", init)
     patch.setattr(_minutes.MinutesService, "start", lambda self: None)
+
+    # Config() names the host microphone (EarPods) for captions: never open a
+    # real device in tests; tests that caption a microphone pass their own.
+    def no_microphone(name):
+        raise OSError("no microphone in tests")
+
+    patch.setattr(_web_viewer, "_open_mic", no_microphone)
     yield home
     patch.undo()

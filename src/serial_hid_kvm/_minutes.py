@@ -24,6 +24,7 @@ lock file with a heartbeat keeps two KVM processes sharing a recording
 folder from working on the same job.  Model output is data: it is parsed as
 JSON, validated, and escaped when rendered - never executed.
 """
+from datetime import datetime, timedelta, timezone
 import html
 import json
 import logging
@@ -56,6 +57,15 @@ NOTES_FOLDER = "meeting-notes"
 REMOTE_ONLY_NOTE = ("NOTE: this transcript comes from live captions of the remote side only (the meeting audio "
                     "played on the target PC). The user's own speech is missing, so answers or decisions may be "
                     "incomplete; say so in uncertainties when relevant.")
+SPEAKERS_NOTE = ("NOTE: this transcript comes from live captions; every line names its speaker. ME = the user "
+                 "(captured by the user's own microphone), REMOTE = the other participants (meeting audio played on "
+                 "the target PC; several people may share this label). Use the labels to tell what the user said, "
+                 "asked or promised from what the others said. Speech the microphones missed is absent.")
+JST = timezone(timedelta(hours=9))
+# Live-caption speakers: labels in AI transcripts and in human-readable files.
+AI_SPEAKER = {"me": "ME", "remote": "REMOTE"}
+SPEAKER_LABELS = {"ja": {"me": "自分", "remote": "相手"}, "zh": {"me": "我", "remote": "对方"}}
+_RECORDING_STAMP = re.compile(r"recording-(\d{4})-(\d\d)-(\d\d)T(\d\d)-(\d\d)-(\d\d)-(\d{3})-JST")
 
 MINUTES_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -236,11 +246,45 @@ def clock(seconds, millis=False):
     return text
 
 
-def srt_text(segments):
+def jst_clock(epoch, date=False):
+    """Epoch seconds -> JST wall-clock HH:MM:SS (with the date when asked)."""
+    return datetime.fromtimestamp(float(epoch), JST).strftime("%Y-%m-%d %H:%M:%S" if date else "%H:%M:%S")
+
+
+def recording_origin(stem):
+    """JST start time (epoch seconds) encoded in a recording name, or None."""
+    match = _RECORDING_STAMP.search(str(stem))
+    if not match:
+        return None
+    y, mo, d, h, mi, sec, ms = map(int, match.groups())
+    return datetime(y, mo, d, h, mi, sec, ms * 1000, tzinfo=JST).timestamp()
+
+
+def has_me(segments):
+    """True when the user's own microphone was captioned (speaker labels apply)."""
+    return any(seg.get("speaker") == "me" for seg in segments)
+
+
+def speaker_text(seg, language, labelled):
+    if not labelled:
+        return seg["text"]
+    labels = SPEAKER_LABELS.get(language, SPEAKER_LABELS["ja"])
+    return f"{labels.get(seg.get('speaker'), labels['remote'])}: {seg['text']}"
+
+
+def srt_text(segments, origin=None, language="ja"):
+    """SubRip from segments: from 00:00 (a recording), or at JST wall-clock
+    times when *origin* is given (captions without a video to follow)."""
+    base = 0.0
+    if origin is not None:
+        start = datetime.fromtimestamp(float(origin), JST)
+        base = float(origin) - start.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    labelled = has_me(segments)
     lines = []
     for n, seg in enumerate(segments, 1):
         end = max(seg["end"], seg["start"] + 0.3)
-        lines += [str(n), f"{clock(seg['start'], True)} --> {clock(end, True)}", seg["text"], ""]
+        lines += [str(n), f"{clock(base + seg['start'], True)} --> {clock(base + end, True)}",
+                  speaker_text(seg, language, labelled), ""]
     return "\n".join(lines)
 
 
@@ -254,17 +298,28 @@ def captions_transcript(jsonl, started_at=None):
         except (ValueError, KeyError, TypeError):
             continue
         if isinstance(row.get("text"), str) and row["text"].strip() and math.isfinite(at):
-            rows.append((at, max(end, at), " ".join(row["text"].split()), str(row.get("lang") or "")))
+            speaker = "me" if row.get("speaker") == "me" else "remote"
+            rows.append((at, max(end, at), " ".join(row["text"].split()), str(row.get("lang") or ""), speaker))
     rows.sort()
     origin = float(started_at) if started_at else (rows[0][0] if rows else 0.0)
     segments = [{"start": round(max(0.0, a - origin), 3), "end": round(max(0.0, b - origin), 3), "text": t[:5000],
-                 "lang": lang[:16]} for a, b, t, lang in rows]
+                 "lang": lang[:16], "speaker": speaker} for a, b, t, lang, speaker in rows]
     duration = max((seg["end"] for seg in segments), default=0.0)
-    return {"language": "", "duration": duration, "segments": segments, "source": "live-captions", "at": utcnow()}
+    return {"language": "", "duration": duration, "segments": segments, "source": "live-captions",
+            "origin": origin, "at": utcnow()}
 
 
-def transcript_lines(segments):
-    return "\n".join(f"[{clock(seg['start'])}] {seg['text']}" for seg in segments)
+def transcript_lines(segments, origin=None):
+    """``[HH:MM:SS] text`` per segment for a summarizer: time from the start, or
+    JST wall-clock when *origin* (epoch seconds) is given; ``ME:``/``REMOTE:``
+    speaker labels when the user's microphone was captioned."""
+    labelled = has_me(segments)
+
+    def stamp(seg):
+        return jst_clock(origin + seg["start"]) if origin is not None else clock(seg["start"])
+
+    return "\n".join(f"[{stamp(seg)}] " + (f"{AI_SPEAKER.get(seg.get('speaker'), 'REMOTE')}: " if labelled else "")
+                     + seg["text"] for seg in segments)
 
 
 # ---------------------------------------------------------------------------
@@ -484,14 +539,16 @@ LABELS = {
                note="AI が自動生成した下書きです。必ず録画で確認してください。時刻リンクで録画の該当位置に移動できます。",
                unknown="未定", norec="なし（ライブ字幕から生成）",
                note_live="AI が自動生成した下書きです。ライブ字幕（音声認識）が元なので、誤認識や抜けがあり得ます。",
-               live_src="ライブ字幕",
-               remote="注意: 相手側（Target の HDMI 音声）の発言のみを含みます。自分の発言は含まれていません。"),
+               live_src="ライブ字幕", when="日時",
+               remote="注意: 相手側（Target の HDMI 音声）の発言のみを含みます。自分の発言は含まれていません。",
+               both="発言者: 自分（自分のマイク）と相手（Target の HDMI 音声）を区別しています。"),
     "zh": dict(summary="摘要", topics="议题", decisions="决定事项", todos="待办事项", questions="未决问题",
                uncertain="不确定之处", none="无", owner="负责人", due="期限", task="任务", at="时间",
                video="录像", length="时长", engine="生成", transcript="转写稿",
                note="AI 自动生成的草稿，请对照录像核实。点击时间可跳到录像对应位置。", unknown="未定",
                norec="无（由实时字幕生成）", note_live="AI 自动生成的草稿，来源是实时字幕（语音识别），可能有误识别或遗漏。",
-               live_src="实时字幕", remote="注意：只包含对方（Target HDMI 声音）的发言，不含自己的发言。"),
+               live_src="实时字幕", remote="注意：只包含对方（Target HDMI 声音）的发言，不含自己的发言。",
+               when="时间", both="发言人：区分了我（自己的麦克风）和对方（Target HDMI 声音）。"),
 }
 
 
@@ -500,24 +557,45 @@ def _md(text):
     return re.sub(r"([\\`*_\[\]<>|])", r"\\\1", text)
 
 
-def markdown_minutes(data, language, stem, video_name, duration, used, srt_name, remote_only=False):
+def _span(origin, duration):
+    """``2026-10-20 10:00–10:44 JST`` for a meeting starting at *origin*."""
+    start, end = datetime.fromtimestamp(origin, JST), datetime.fromtimestamp(origin + float(duration or 0), JST)
+    tail = end.strftime("%H:%M") if end.date() == start.date() else end.strftime("%Y-%m-%d %H:%M")
+    return f"{start:%Y-%m-%d %H:%M}–{tail} JST"
+
+
+def _at_label(seconds, origin, target):
+    """JST wall-clock time; with a video also the position in it (links use it)."""
+    if origin is None:
+        return clock(seconds)
+    wall = jst_clock(origin + seconds)
+    return f"{wall} · {clock(seconds)}" if target else wall
+
+
+def markdown_minutes(data, language, stem, video_name, duration, used, srt_name, remote_only=False,
+                     origin=None, speakers=False):
     t = LABELS.get(language, LABELS["ja"])
     target = quote(video_name) if video_name else None
 
     def at(seconds):
-        return f"[{clock(seconds)}]({target}#t={int(seconds)})" if target else f"`{clock(seconds)}`"
+        label = _at_label(seconds, origin, target)
+        return f"[{label}]({target}#t={int(seconds)})" if target else f"`{label}`"
 
     lines = [f"# {_md(data['title'])}", ""]
     if target:
         lines.append(f"- {t['video']}: [{_md(video_name)}]({target})")
     else:
         lines.append(f"- {t['video']}: {t['norec']}")
+    if origin is not None:
+        lines.append(f"- {t['when']}: {_span(origin, duration)}")
     if remote_only:
         lines.append(f"- {t['remote']}")
+    elif speakers:
+        lines.append(f"- {t['both']}")
     lines += [f"- {t['length']}: {clock(duration)}",
              f"- {t['transcript']}: [{_md(srt_name)}]({quote(srt_name)}) "
              f"({'kvm-ai-hub' if target else t['live_src']})",
-             f"- {t['engine']}: {used} · {time.strftime('%Y-%m-%d %H:%M')}",
+             f"- {t['engine']}: {used} · {datetime.now(JST):%Y-%m-%d %H:%M} JST",
              f"- {t['note'] if target else t['note_live']}", "", f"## {t['summary']}", "", _md(data["summary"]) or t["none"], "",
              f"## {t['topics']}", ""]
     if not data["topics"]:
@@ -541,19 +619,27 @@ def markdown_minutes(data, language, stem, video_name, duration, used, srt_name,
     return "\n".join(lines) + "\n"
 
 
-def minutes_page(data, language, title, video_url, segments, md_url, srt_url, nonce="", remote_only=False):
+def minutes_page(data, language, title, video_url, segments, md_url, srt_url, nonce="", remote_only=False,
+                 origin=None):
     """Self-contained HTML view: every model string is escaped."""
     t = LABELS.get(language, LABELS["ja"])
     e = html.escape
+    labelled = has_me(segments)
 
     def at(seconds):
+        label = _at_label(seconds, origin, video_url)
         if not video_url:
-            return f"<span class=t>{clock(seconds)}</span>"
-        return f'<a href="#t={int(seconds)}" data-t="{float(seconds)}">{clock(seconds)}</a>'
+            return f"<span class=t>{e(label)}</span>"
+        return f'<a href="#t={int(seconds)}" data-t="{float(seconds)}">{e(label)}</a>'
 
     body = [f"<h1>{e(data['title'])}</h1>", f"<p class=note>{e(t['note'] if video_url else t['note_live'])}</p>"]
-    if remote_only:
+    if origin is not None:
+        duration = max((s["end"] for s in segments), default=0.0)
+        body.append(f"<p class=note>{e(t['when'])}: {e(_span(origin, duration))}</p>")
+    if remote_only and not labelled:
         body.append(f"<p class=note>{e(t['remote'])}</p>")
+    elif labelled:
+        body.append(f"<p class=note>{e(t['both'])}</p>")
     if video_url:
         body.append(f'<video id=v controls preload=metadata src="{e(video_url)}"></video>')
     links = [f'<a href="{e(md_url)}&amp;download=1">minutes.md</a>'] if md_url else []
@@ -574,7 +660,8 @@ def minutes_page(data, language, title, video_url, segments, md_url, srt_url, no
     for key, label in (("open_questions", t["questions"]), ("uncertainties", t["uncertain"])):
         body.append(f"<h2>{e(label)}</h2><ul>" + "".join(f"<li>{e(q)}</li>" for q in data[key]) + "</ul>")
     body.append(f"<details><summary>{e(t['transcript'])}</summary><div class=tr>"
-                + "".join(f"<p>{at(s['start'])} {e(s['text'])}</p>" for s in segments) + "</div></details>")
+                + "".join(f"<p>{at(s['start'])} {e(speaker_text(s, language, labelled))}</p>" for s in segments)
+                + "</div></details>")
     script = ("document.addEventListener('click',ev=>{const a=ev.target.closest('a[data-t]');const v=document.getElementById('v');"
               "if(!a||!v)return;ev.preventDefault();v.currentTime=+a.dataset.t;v.play().catch(()=>{});"
               "v.scrollIntoView({block:'nearest'});});")
@@ -885,7 +972,7 @@ class MinutesService:
         saved = json.loads(minutes_path.read_text(encoding="utf-8"))
         data = validate_minutes(saved["minutes"], duration)
         markdown = markdown_minutes(data, language, job["stem"], job["stem"] + ".mp4", duration,
-                                    saved["used"], srt_name)
+                                    saved["used"], srt_name, origin=recording_origin(job["stem"]))
         atomic_text(confined(self.root, self.root / (job["stem"] + ".minutes.md")), markdown)
         self._save(job, status="done", used=saved["used"], language=language, error="")
         logger.info("Minutes ready: %s (%s)", job["stem"], saved["used"])
@@ -901,19 +988,22 @@ class MinutesService:
                                                     ensure_ascii=False, indent=1))
         transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
         segments, duration = transcript["segments"], float(transcript.get("duration") or 0)
+        origin = transcript.get("origin", job.get("started_at"))
         language = meeting_language(transcript)
+        speakers = has_me(segments)
         self._save(job, duration=duration, language=language)
         srt_name = job["stem"] + ".srt"
-        atomic_text(self._out(job, ".srt"), srt_text(segments))
+        atomic_text(self._out(job, ".srt"), srt_text(segments, origin, language))
         minutes_path = work / "minutes.json"
         if not minutes_path.is_file():
             self._save(job, status="summarizing", error="")
-            data, used = self._summarize(job, work, segments, language, duration, REMOTE_ONLY_NOTE)
+            data, used = self._summarize(job, work, segments, language, duration,
+                                         SPEAKERS_NOTE if speakers else REMOTE_ONLY_NOTE)
             atomic_text(minutes_path, json.dumps({"used": used, "minutes": data}, ensure_ascii=False, indent=2))
         saved = json.loads(minutes_path.read_text(encoding="utf-8"))
         data = validate_minutes(saved["minutes"], duration)
         markdown = markdown_minutes(data, language, job["stem"], None, duration, saved["used"], srt_name,
-                                    remote_only=True)
+                                    remote_only=not speakers, origin=origin, speakers=speakers)
         atomic_text(self._out(job, ".minutes.md"), markdown)
         self._save(job, status="done", used=saved["used"], language=language, error="")
         logger.info("Caption minutes ready: %s (%s)", job["stem"], saved["used"])
@@ -1065,5 +1155,6 @@ class MinutesService:
             video = self.library.file_url(job["source"])
         srt_name = prefix + stem + ".srt"
         srt = self.library.file_url(srt_name) if (self.root / srt_name).is_file() else None
+        origin = transcript.get("origin", (job or {}).get("started_at")) if notes else recording_origin(stem)
         return minutes_page(data, language, data["title"], video, transcript["segments"],
-                            self.library.file_url(prefix + name), srt, nonce, remote_only=notes)
+                            self.library.file_url(prefix + name), srt, nonce, remote_only=notes, origin=origin)

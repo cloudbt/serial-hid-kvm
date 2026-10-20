@@ -57,6 +57,17 @@ logger = logging.getLogger(__name__)
 _WEBRTC_AVAILABLE = importlib.util.find_spec("aiortc") is not None
 
 
+def _open_mic(name: str) -> AudioCapture:
+    """Open the host microphone captioned as the user's voice (found by name, like recording)."""
+    from ._server_recorder import find_input_device
+    index = find_input_device(name)
+    if index is None:
+        raise OSError(f"no input device named like {name!r}")
+    capture = AudioCapture(str(index))
+    capture.start()
+    return capture
+
+
 def _is_private_address(ip: str) -> bool:
     """Whether *ip* is loopback / LAN / link-local (vs. a public address).
 
@@ -338,6 +349,14 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
 #ccLines{display:flex;flex-direction:column;justify-content:flex-end;overflow:hidden;max-height:calc(2.9em + 8px);background:rgba(0,0,0,.74);color:#fff;font-size:var(--cc-size,24px);line-height:1.45;padding:4px 14px;border-radius:6px;text-align:center;text-shadow:0 1px 2px #000}
 #ccLines:empty{display:none}
 #ccLines .interim{opacity:.7}
+.cc-who{display:inline-block;font-size:.6em;line-height:1.5;padding:0 .45em;border-radius:3px;margin-right:.45em;vertical-align:.15em;background:#45617d;color:#e0e9f7}
+.cc-me .cc-who{background:#1d9e75;color:#fff}
+#ccLines .cc-me{color:#c9f2e2}
+#ccHistoryList .cc-who{font-size:11px;vertical-align:1px}
+.cc-mic{display:flex!important;align-items:center;justify-content:flex-start!important;gap:6px;margin:6px 0 2px}
+.cc-mic input{margin:0}
+#ccMicState{font-size:12px;color:#8fa6c4;margin:0 0 6px}
+#ccMicState.warn{color:#ffd3a0}
 #ccNotice{font-size:12px;background:rgba(70,36,0,.88);color:#ffd3a0;padding:2px 10px;border-radius:5px}
 #ccNotice:empty{display:none}
 :root{--side-w:0px;--tb-h:40px;--bar-h:0px}
@@ -437,7 +456,9 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
           <option value="16">16 px</option><option value="20">20 px</option><option value="24">24 px</option><option value="32">32 px</option><option value="40">40 px</option>
         </select></label>
         <div class="panel-row"><button id="btnCcHistory" type="button" title="右侧面板：字幕历史 + 会议要点">面板</button><button id="btnCcCopy" type="button">复制</button><button id="btnCcDownload" type="button">下载 .txt</button></div>
-        <p>只识别 Target 的 HDMI 声音，由局域网内的 kvm-ai-hub 生成，仅供参考。录制时同时保存为 .live.vtt。</p>
+        <label class="cc-mic" title="把本机麦克风（你自己的声音）也加入字幕，标为「我」。服务端设置，所有观看者共用。"><input type="checkbox" id="ccMic"> 我的麦克风 <span id="ccMicName"></span></label>
+        <p id="ccMicState"></p>
+        <p>「对方」= Target 的 HDMI 声音，「我」= 本机麦克风。由局域网内的 kvm-ai-hub 生成，时间为日本时间（JST），仅供参考。录制时同时保存为 .live.vtt。</p>
       </div>
     </details>
   </div>
@@ -793,7 +814,10 @@ function connect() {
         }
         else if (msg.type === "srec_notice") { statusEl.textContent = msg.message; showHint(msg.message); }
         else if (msg.type === "caption") { ccCaption(msg); }
-        else if (msg.type === "captions_state") { ccSetState(msg.state, msg.detail || "", msg.on, msg.since); }
+        else if (msg.type === "captions_state") {
+          ccSetState(msg.state, msg.detail || "", msg.on, msg.since, msg.mic);
+          if (msg.notice) showHint(msg.notice);
+        }
         else if (msg.type === "live_summary") { onLiveSummary(msg); }
         else if (msg.type === "minutes_action") {
           if (msg.error) showHint("会议记录：" + msg.error); else showHint(msg.message || "已加入会议记录队列");
@@ -1516,6 +1540,14 @@ const ccSeen = new Set();
 let ccRecent = [];
 let ccAvailable = false, ccState = "off", ccHideTimer = null;
 let ccOn = false, ccSince = null;
+// The user's own voice (host microphone) as a second caption stream.
+let ccMic = {available:false, on:false, name:"", state:"off", detail:""};
+const ccMicBox = document.getElementById("ccMic");
+const ccMicStateEl = document.getElementById("ccMicState");
+const CC_WHO = {me:"我", remote:"对方"};
+// Every caption time is Japan time, whatever the viewing device's time zone.
+const JST_CLOCK = new Intl.DateTimeFormat("en-GB", {timeZone:"Asia/Tokyo", hour:"2-digit", minute:"2-digit",
+  second:"2-digit", hourCycle:"h23"});
 try { ccSizeSelect.value = localStorage.getItem("kvmCaptionSize") || "24"; } catch (e) { ccSizeSelect.value = "24"; }
 if (!ccSizeSelect.value) ccSizeSelect.value = "24";
 ccOverlay.style.setProperty("--cc-size", ccSizeSelect.value + "px");
@@ -1533,7 +1565,8 @@ function ccRenderButton() {
   ccBtn.querySelector(".cc-word").textContent = word;
   ccBtn.setAttribute("aria-label", "CC " + word);
   const since = ccSince ? " · " + ccClock(ccSince * 1000).slice(0, 5) + " 起" : "";
-  ccPill.textContent = !ccAvailable ? "字幕不可用" : live ? "● 字幕开启" + since
+  const mic = ccOn && ccMic.on ? " · 含我的麦克风" : "";
+  ccPill.textContent = !ccAvailable ? "字幕不可用" : live ? "● 字幕开启" + since + mic
     : ccOn ? "● 字幕" + word + since : "字幕关闭";
   ccPill.className = "cc-pill" + (live ? " on" : wait ? " wait" : "");
 }
@@ -1542,18 +1575,37 @@ function ccConfigure(info) {
   ccBtn.disabled = !ccAvailable;
   ccBtn.title = ccAvailable ? "实时字幕（Target HDMI 声音 → kvm-ai-hub）· 所有观看者共用一个开关"
     : "字幕不可用：" + ((info && info.reason) || "服务端未提供");
-  if (!ccAvailable) { ccOn = false; ccSetState("unavailable", (info && info.reason) || ""); return; }
+  if (!ccAvailable) { ccOn = false; ccMicApply(null); ccSetState("unavailable", (info && info.reason) || ""); return; }
   ccApply(!!info.on, info.since || null);
+  ccMicApply(info.mic || null);
   ccSetState(ccOn ? "connecting" : "off", "");
 }
+const CC_MIC_TEXT = {connecting:"正在连接…", live:"识别中", offline:"离线，正在重试"};
+function ccMicApply(mic) {
+  ccMic = mic || {available:false, on:false, name:"", state:"off", detail:""};
+  ccMicBox.checked = !!ccMic.on;
+  ccMicBox.disabled = !ccMic.available;
+  document.getElementById("ccMicName").textContent = ccMic.name ? "（" + ccMic.name + "）" : "";
+  let text = !ccMic.available ? "服务端没有配置麦克风，只识别对方的声音"
+    : !ccMic.on ? "关闭：只识别对方（HDMI）的声音"
+    : !ccOn ? "打开 CC 后同时识别你的声音"
+    : (CC_MIC_TEXT[ccMic.state] || ccMic.state) + (ccMic.detail ? "：" + ccMic.detail : "");
+  ccMicStateEl.textContent = text;
+  ccMicStateEl.classList.toggle("warn", ccOn && ccMic.on && ccMic.state === "offline");
+}
+ccMicBox.addEventListener("change", () => {
+  wsSend({type:"captions_mic", on:ccMicBox.checked});
+  ccMicApply({...ccMic, on:ccMicBox.checked});
+});
 // The server's switch: on/off and since when (epoch seconds).
 function ccApply(on, since) {
   const wasOn = ccOn;
   ccOn = on; ccSince = on ? since : null;
   if (wasOn && !on) { ccRecent = []; ccLines.replaceChildren(); ccOverlay.classList.add("idle"); meetingCheck(); }
 }
-function ccSetState(state, detail, on, since) {
+function ccSetState(state, detail, on, since, mic) {
   if (on !== undefined) ccApply(!!on, since || null);
+  if (mic !== undefined) ccMicApply(mic);
   ccState = state;
   ccStateEl.textContent = (CC_STATE_TEXT[state] || state) + (detail ? "：" + detail : "");
   let notice = "";
@@ -1576,15 +1628,18 @@ function ccShowOverlay() {
   clearTimeout(ccHideTimer);
   ccHideTimer = setTimeout(() => { if (!ccNotice.textContent) ccOverlay.classList.add("idle"); }, 10000);
 }
-function ccClock(ms) {
-  const d = new Date(ms);
-  return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, "0")).join(":");
+function ccClock(ms) { return JST_CLOCK.format(new Date(ms)); }
+// "我" / "对方" chip; remote lines are only labelled while the microphone is captioned.
+function ccWho(speaker) {
+  if (speaker !== "me" && !ccMic.on) return null;
+  return Object.assign(document.createElement("span"), {className: "cc-who", textContent: CC_WHO[speaker] || CC_WHO.remote});
 }
 function ccAppendHistory(entry) {
   if (ccHistory.length === 1) ccHistoryList.replaceChildren();
   const p = document.createElement("p");
+  if (entry.speaker === "me") p.className = "cc-me";
   const t = document.createElement("time"); t.textContent = ccClock(entry.at);
-  p.append(t, document.createTextNode(entry.text));
+  p.append(...[t, ccWho(entry.speaker), document.createTextNode(entry.text)].filter(Boolean));
   const stick = ccHistoryList.scrollTop + ccHistoryList.clientHeight >= ccHistoryList.scrollHeight - 30;
   ccHistoryList.append(p);
   while (ccHistoryList.childElementCount > 2000) ccHistoryList.firstElementChild.remove();
@@ -1595,10 +1650,11 @@ function ccCaption(msg) {
   const final = msg.final !== false;
   if (final) {
     // Only finals enter the history; interim results are overlay-only.
-    const key = msg.at + "|" + msg.text;
+    const speaker = msg.speaker === "me" ? "me" : "remote";
+    const key = speaker + "|" + msg.at + "|" + msg.text;
     if (ccSeen.has(key)) return;
     ccSeen.add(key);
-    const entry = {at: msg.at || Date.now(), text: msg.text};
+    const entry = {at: msg.at || Date.now(), text: msg.text, speaker};
     ccHistory.push(entry);
     if (ccHistory.length > 5000) ccHistory.shift();
     ccAppendHistory(entry);
@@ -1607,18 +1663,22 @@ function ccCaption(msg) {
   if (msg.replay) return;
   // Interim -> newer interim -> final of the same sentence (same seq) update
   // one line in place, so ~0.7 s interim updates never rebuild the overlay.
-  const last = ccRecent[ccRecent.length - 1];
+  // Each speaker is its own hub stream with its own seq numbers.
+  const speaker = msg.speaker === "me" ? "me" : "remote";
+  const last = ccRecent.filter(r => r.speaker === speaker).pop();
   const sameSeq = last && msg.seq != null && last.seq === msg.seq;
+  const cls = (speaker === "me" ? "cc-me" : "cc-remote") + (final ? "" : " interim");
   if (last && (sameSeq || !last.final)) {
     if (sameSeq && last.final && !final) return;  // late interim after its final
     last.seq = msg.seq; last.final = final;
-    if (last.el.textContent !== msg.text) last.el.textContent = msg.text;
-    last.el.className = final ? "" : "interim";
+    if (last.text.textContent !== msg.text) last.text.textContent = msg.text;
+    last.el.className = cls;
   } else {
-    const el = document.createElement("div"); el.textContent = msg.text;
-    if (!final) el.className = "interim";
+    const el = document.createElement("div"); el.className = cls;
+    const text = document.createElement("span"); text.textContent = msg.text;
+    el.append(...[ccWho(speaker), text].filter(Boolean));
     ccLines.append(el);
-    ccRecent.push({seq: msg.seq, final, el});
+    ccRecent.push({seq: msg.seq, final, el, text, speaker});
     while (ccRecent.length > 3) ccRecent.shift().el.remove();
   }
   ccShowOverlay();
@@ -1627,7 +1687,10 @@ function ccResetHistory() {
   ccHistory.length = 0; ccSeen.clear();
   ccHistoryList.replaceChildren(Object.assign(document.createElement("p"), {textContent: "还没有字幕。"}));
 }
-function ccHistoryText() { return ccHistory.map(h => ccClock(h.at) + "  " + h.text).join("\n") + "\n"; }
+function ccHistoryText() {
+  const labelled = ccHistory.some(h => h.speaker === "me");
+  return ccHistory.map(h => ccClock(h.at) + "  " + (labelled ? CC_WHO[h.speaker] + "：" : "") + h.text).join("\n") + "\n";
+}
 async function ccCopy() {
   if (!ccHistory.length) { showHint("还没有字幕"); return; }
   try { await navigator.clipboard.writeText(ccHistoryText()); showHint("已复制 " + ccHistory.length + " 行字幕"); }
@@ -1789,7 +1852,7 @@ function lsRender() {
   lsMeta.classList.toggle("failed", m.state === "failed");
   lsMeta.classList.toggle("final", m.state === "idle" && !!m.final && !!m.data);
   const finals = (m.session && m.session.finals) || 0;
-  const hhmm = ms => { const d = new Date(ms); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
+  const hhmm = ms => ccClock(ms).slice(0, 5);
   let meta;
   if (m.state === "running") meta = (m.final ? "最终总结生成中…（" : "正在总结…（") + (LS_NAMES[m.summarizer] || m.summarizer) + "）";
   else if (m.state === "failed") meta = (m.final ? "最终总结失败：" : "总结失败：") + (m.error || "unknown");
@@ -2713,12 +2776,17 @@ class WebViewerServer:
             max_seconds=getattr(config, "recording_max_seconds", 3 * 3600),
             on_stop=self._server_recording_stopped)
         self._sop = SopService(self)
+        mic_name = (getattr(config, "captions_mic", "") or getattr(config, "recording_mic", "") or "").strip()
+        if mic_name.lower() in ("off", "none"):
+            mic_name = ""
         self._captions = CaptionService(
             audio, getattr(config, "ai_hub_url", ""), getattr(config, "ai_hub_key", None),
-            getattr(config, "captions_language", "auto"), getattr(config, "captions_enabled", True))
+            getattr(config, "captions_language", "auto"), getattr(config, "captions_enabled", True),
+            mic=(lambda: _open_mic(mic_name)) if mic_name else None, mic_name=mic_name)
         self._minutes = MinutesService(config, self._recording_library)
         self._meeting = LiveMeeting(config.recording_dir, self._captions, self._minutes,
-                                    getattr(config, "captions_summary_interval", 5))
+                                    getattr(config, "captions_summary_interval", 0),
+                                    getattr(config, "captions_meeting_gap", 30))
         self._meeting_task = None
         self._meeting_jobs: set = set()  # not awaited on stop (summaries can be long)
         self._viewers: set = set()  # authenticated /ws clients (live_summary audience)
@@ -3234,7 +3302,8 @@ class WebViewerServer:
                 "capture_status": self._hw.get_capture().get_cached_info(),
                 "captions": {"available": self._captions.available,
                              "reason": self._captions.reason,
-                             "on": self._captions.on, "since": self._captions.on_since},
+                             "on": self._captions.on, "since": self._captions.on_since,
+                             "mic": self._captions.state_message()["mic"]},
                 "minutes": {"enabled": self._minutes.enabled,
                             "default": self._meeting.summarizer},
                 "server_recording": {"available": True, "fps": list(FPS_CHOICES),
@@ -3989,6 +4058,15 @@ class WebViewerServer:
                         self._meeting.set_cc(bool(ev.get("on")))
                     except ValueError as exc:
                         await ws.send(json.dumps({"type":"captions_state", "state":"unavailable", "detail":str(exc)}))
+                    continue
+
+                if ev_type == "captions_mic":
+                    # 「我的麦克风」: the user's own voice in the captions, for every viewer.
+                    try:
+                        self._meeting.set_mic(bool(ev.get("on")))
+                    except ValueError as exc:
+                        await ws.send(json.dumps({**self._captions.state_message(), "notice": str(exc)},
+                                                 ensure_ascii=False))
                     continue
 
                 if ev_type == "live_summary":
