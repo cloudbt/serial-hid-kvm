@@ -41,6 +41,8 @@ Client→server binary is handled at the top of `_recv_input` (checks
 | `audio` | `on` (bool) | subscribe/unsubscribe this client's PCM feed (WAN clients start unsubscribed; while off, no `0x02` frames are sent at all) |
 | `webrtc_offer` | `sdp` (complete, ICE-gathered), `gen`, `bitrate?`, `fps?` | negotiate H.264 WebRTC stream; server keeps the device, pauses this client's JPEG; replies `webrtc_answer` or `webrtc_error` echoing `gen`. Optional `bitrate`/`fps` come from the toolbar quality selector and are clamped to config maxima; absent → LAN gets configured values (floor at half cap), WAN gets 30 fps / 4 Mbps start with free REMB adaptation (`_webrtc_params`) |
 | `webrtc_stop` | — | close the WebRTC session; JPEG stream resumes |
+| `srec_start` | `fps` (15/30), `source` (`mic`/`hdmi`/`mix`/`none`), `minutes?` | start a **server-side** recording (default mode): ffmpeg encodes the capture + Host mic (`recording_mic`) + server HDMI audio into `.recording-sessions/<id>/source.mkv`. Broadcast `srec_state` to every viewer; on failure reply `srec_error` + `srec_state` |
+| `srec_stop` | — | stop the server recording; the recorder thread then saves it (same pipeline as `rec_session_finish`: minutes, SOP notice, MP4 export by remux) and broadcasts `rec_session_saved` (`server: true`) and later `rec_exported` |
 | `rec_start` | `filename` | open recording file under `recording_dir` |
 | `rec_stop` | — | close file, reply `rec_saved` |
 | `rec_session_start` | `session` (32 hex), `filename`, `minutes?` (`agy`/`codex`/`mac-qwen`/`off`) | attach/resume a resumable recording session; `minutes` is stored in `session.json` on first attach (later attaches keep the original), together with `started_epoch` (server clock, origin of `.live.vtt`) |
@@ -65,6 +67,9 @@ like `stream`, and recording uses `ws.send` directly).
 | `capture_device` | `label` | Direct mode matches this device in `enumerateDevices()` |
 | `webrtc_answer` | `sdp`, `gen` | complete answer SDP → `setRemoteDescription` (applied only if `gen` matches the current offer — late answers are dropped) |
 | `webrtc_error` | `error`, `gen` | reject pending offer / show error (stale `gen` ignored) |
+| `srec_state` | `active`, `starting`, `session`, `fps`, `source`, `encoder` (`h264_amf`/`libx264`), `elapsed` (s), `frames`, `bytes`, `audio_inputs`, `warnings[]`, `stopped_reason?` (`manual`/`max_duration`/`disk_full`/`error`/`shutdown`/`recovered`), `error?` | Record button state on every viewer (also in `hello.server_recording.state`); the timer runs from `elapsed` |
+| `srec_error` | `error` | the start request failed (nothing recorded) |
+| `srec_notice` | `message` | automatic stop (3 h limit, low disk, error) or a save failure |
 | `rec_saved` | `path` | show "Saved: …" |
 | `rec_error` | `error` | show error |
 | `caption` | `seq`,`t0`,`t1` (s from hub stream start),`text`,`lang`,`final`,`at`/`end` (epoch ms),`replay?` | `final: false` = interim (overlay only; later interim and the final with the same `seq` replace it in place). Finals go to the overlay (max 2 lines) and history. `replay: true` = recent finals re-sent on subscribe (history only) |

@@ -46,7 +46,20 @@ Run the `py_compile` + `node --check` block from SKILL.md. Restart server, reloa
 
 # Catalog of implemented features (mirror these)
 
-### Screen recording (`Record` button)
+### Server-side recording (`Record` button, default)
+- Server: `_server_recorder.py` `ServerRecorder` — wall-clock CFR raw BGR frames to an
+  ffmpeg subprocess (stdin) + 20 ms mixed PCM blocks (server HDMI `AudioCapture` +
+  Host mic via sounddevice) over a 127.0.0.1 socket → H.264 (`h264_amf`, fallback
+  `libx264`) + AAC in MKV. `_web_viewer.py` handles `srec_start`/`srec_stop`, saves via
+  `RecordingSessions.create_server`/`finish_server`, and recovers unfinished server
+  sessions on start. `convert_recording` remuxes H.264/AAC sources (`-c copy`).
+- Why: browser MediaRecorder at 1080p queued frames until Chrome killed the tab
+  (Out of Memory). PyAV encoding was ~15 fps; the ffmpeg CLI does far more.
+- Client: `#recMode` (server / browser fallback, localStorage `kvmRecMode`),
+  `#recFps` (15/30), `toggleRecording()`, `srecApply()` mirrors `srec_state`.
+- Config: `recording_mic` (default `EarPods`), `recording_max_seconds` (10800).
+
+### Screen recording, browser fallback (`Record` button with 浏览器录制)
 - Client: `MediaRecorder` on `captureDisplayStream()` (canvas or `<video>`) +
   audio from `recDest`; chunks sent as binary `0x10`; MM:SS timer; red pulse.
 - Server: `_recv_input` handles `rec_start`/`rec_stop` + `0x10` writes;

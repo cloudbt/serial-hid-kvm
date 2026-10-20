@@ -73,11 +73,18 @@ def convert_recording(source, destination=None):
         source_count, source_duration = _timeline(probe, source)
         source_info = json.loads(_run([probe, "-v", "error", "-show_streams", "-of", "json", str(source)]))
         audio_count = sum(s["codec_type"] == "audio" for s in source_info["streams"])
+        video_codecs = [s["codec_name"] for s in source_info["streams"] if s["codec_type"] == "video"]
+        audio_codecs = [s["codec_name"] for s in source_info["streams"] if s["codec_type"] == "audio"]
+        if video_codecs[:1] == ["h264"] and all(c == "aac" for c in audio_codecs):
+            # Server recordings are already H.264/AAC: remux only (seconds, no quality loss).
+            codec_args = ["-c", "copy"]
+        else:
+            codec_args = ["-c:v", "libx264", "-threads", "2",
+                          "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                          "-crf", "23", "-preset", "veryfast", "-fps_mode:v", "passthrough",
+                          "-enc_time_base:v", "1:1000", "-c:a", "aac", "-b:a", "128k"]
         _run([ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-i", str(source),
-              "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-threads", "2",
-              "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-              "-crf", "23", "-preset", "veryfast", "-fps_mode:v", "passthrough",
-              "-enc_time_base:v", "1:1000", "-c:a", "aac", "-b:a", "128k",
+              "-map", "0:v:0", "-map", "0:a?", *codec_args,
               "-movflags", "+faststart", "-n", str(temporary)])
         count, duration = _timeline(probe, temporary)
         info = json.loads(_run([probe, "-v", "error", "-show_streams", "-of", "json", str(temporary)]))
@@ -93,10 +100,10 @@ def convert_recording(source, destination=None):
         # during conversion; never replace another session's exported video.
         os.link(temporary, destination)
         log.write_text(f"OK: {count} video packets, {duration:.3f}s, {audio_count} audio track(s)\n"
-                       f"MP4: {destination}\nWebM retained: {source}\n", encoding="utf-8")
+                       f"MP4: {destination}\nSource retained: {source}\n", encoding="utf-8")
         return destination
     except Exception as exc:
-        log.write_text(f"FAILED: {exc}\nWebM retained: {source}\n", encoding="utf-8")
+        log.write_text(f"FAILED: {exc}\nSource retained: {source}\n", encoding="utf-8")
         raise
     finally:
         temporary.unlink(missing_ok=True)
