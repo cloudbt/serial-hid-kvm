@@ -309,7 +309,7 @@ def parse_json_text(text):
 def summarize_agy(executable, workspace, transcript_path, prompt, timeout, pulse, schema=MINUTES_SCHEMA):
     if not executable:
         raise MinutesError("找不到 agy CLI")
-    prompt = (f"Use view_file to read exactly this one file: {Path(transcript_path).resolve()} "
+    prompt = (f"Use view_file (or read_file) to read exactly this one file: {Path(transcript_path).resolve()} "
               "(the meeting transcript). Read no other file and use no other tool.\n" + prompt)
     try:
         data = run_agy(executable, workspace, prompt, [transcript_path], timeout, pulse, schema=schema)

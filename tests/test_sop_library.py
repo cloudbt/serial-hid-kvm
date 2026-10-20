@@ -286,6 +286,10 @@ def test_guard_exact_read_allowlist_and_all_other_tools_denied(tmp_path):
     for name in ('run_command','call_mcp_tool','write_to_file','read_url_content','invoke_subagent','ask_permission'):
         assert decide(call(name,{}),paths)=='deny'
     assert decide(call('view_file',{'AbsolutePath':str(tmp_path/'other.mp4')}),paths)=='deny'
+    # Newer agy models read with read_file(Path=...): same exact-file allowlist.
+    assert decide(call('read_file',{'Path':str(allowed)}),paths)=='auto_approve'
+    assert decide(call('read_file',{'Path':str(tmp_path/'other.mp4')}),paths)=='deny'
+    assert decide(call('read_file',{}),paths)=='deny'
     with pytest.raises(ValueError):validate_result({**result(),'steps':[{**result()['steps'][0],'at':100}]},3)
 
 

@@ -8,6 +8,20 @@ import os
 from pathlib import Path
 import sys
 
+# Read-only file tools and their path argument (agy models differ: older
+# ones call view_file, newer ones read_file).
+READ_TOOLS = {"view_file": "AbsolutePath", "read_file": "Path"}
+
+
+def read_path(call):
+    """The path a read-only file tool asks for, or None for any other tool."""
+    args = call.get("args", {})
+    key = READ_TOOLS.get(call.get("name"))
+    if key is None or not isinstance(args, dict):
+        return None
+    path = args.get(key, args.get("AbsolutePath"))
+    return path if isinstance(path, str) else None
+
 
 def decide(payload, allowed):
     call = payload.get("toolCall", {})
@@ -15,8 +29,8 @@ def decide(payload, allowed):
     # network, target, or process side effects.
     if call.get("name") == "finish":
         return "allow"
-    path = call.get("args", {}).get("AbsolutePath")
-    if call.get("name") == "view_file" and isinstance(path, str):
+    path = read_path(call)
+    if path is not None:
         try:
             canonical = os.path.normcase(str(Path(path).resolve()))
             if canonical in {os.path.normcase(p) for p in allowed} and Path(path).is_file():
@@ -35,7 +49,7 @@ def main():
         call = payload.get("toolCall", {})
         decision = decide(payload, allowed)
         record = {"mode": mode, "tool": call.get("name"),
-                  "path": call.get("args", {}).get("AbsolutePath"),
+                  "path": read_path(call),
                   "decision": decision, "error": payload.get("error"),
                   "model": payload.get("modelName")}
         with (root / "audit.jsonl").open("a", encoding="utf-8") as file:

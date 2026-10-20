@@ -335,7 +335,7 @@ All use the `SHKVM_` prefix:
 | `SHKVM_AI_HUB_KEY` | — | Bearer key for kvm-ai-hub (env/YAML only, no CLI flag) |
 | `SHKVM_CAPTIONS` | `true` | Enable the CC (live captions) button |
 | `SHKVM_CAPTIONS_LANGUAGE` | `auto` | Language hint for captions and transcription |
-| `SHKVM_CAPTIONS_SUMMARY_INTERVAL` | `5` | Live meeting points every N minutes while CC is on (`0`/`3`/`5`/`10`) |
+| `SHKVM_CAPTIONS_SUMMARY_INTERVAL` | `0` | Initial auto-summary interval while CC is on (`0`/`3`/`5`/`10`); every new meeting starts with it off |
 | `SHKVM_MINUTES` | `true` | Generate meeting minutes after recordings |
 | `SHKVM_MINUTES_SUMMARIZER` | `agy` | Default summarizer: `agy`, `codex`, `mac-qwen`, `off` |
 | `SHKVM_MINUTES_FALLBACK_ORDER` | `agy,codex,mac-qwen` | Tried after the chosen one fails (`mac-qwen` never falls back) |
@@ -406,9 +406,12 @@ show_cursor: false
 Both use **kvm-ai-hub**, a LAN service (Mac mini) that runs Qwen3-ASR.
 
 - **CC button** — live captions of the *Target HDMI* audio (the server's
-  `audio_device`, never the host mic). The server opens one hub connection
-  per process while at least one viewer has CC on and sends plain text, so WAN
-  viewers work too. The ▾ menu sets font size and opens a history panel
+  `audio_device`, never the host mic). CC is one switch on the server, shared
+  by every viewer (turn it on on the PC and the phone shows it on too) and
+  kept across restarts; viewers disconnecting or reconnecting never change
+  it. The server keeps one hub connection while CC is on and sends plain
+  text, so WAN viewers work too. CC left on with no viewer at all for 2 hours
+  is turned off (captions only, nothing is summarized). The ▾ menu sets font size and opens a history panel
   (copy / download .txt). While a recording is in progress the captions are
   also written to `<recording>.live.vtt` (reference only). Without an audio
   device the button shows "CC 不可用".
@@ -433,16 +436,16 @@ $env:SHKVM_MAC_LLM_KEY = "<splash key>"   # only for Mac Qwen minutes
 - **Side panel** (CC ▾ → 面板) — docked on the right (the picture area
   shrinks instead of being covered; drag the left edge for width, the middle
   bar for the split). Top: caption history. Bottom: **会议要点** — live meeting
-  points summarized from the final captions every 3/5/10 minutes (or
-  「立即总结」) with the summarizer chosen in 会议记录; new items are
-  highlighted. 「新会议」 starts a new CC session; 「生成会议记录」 writes minutes
-  from the captions alone into `recording_dir/meeting-notes/` (remote voice
-  only) — also done automatically for unrecorded meetings when the CC session
-  ends. Captions are kept in `recording_dir/.captions/` and a session resumes
-  if CC is reopened within 10 minutes (even after a restart). Turning CC
-  off triggers one last **final summary** in the background (even with the
-  interval off, and even if the page is closed); it stays visible in the
-  panel afterwards, also after a page reload with CC off.
+  points summarized from the final captions with the summarizer chosen in
+  会议记录; new items are highlighted. AI is called **only** when asked:
+  every 3/5/10 minutes after 「自动」 was set (off by default, and off again for
+  every new meeting), or on 「立即总结」 (with CC off it summarizes what is
+  left). Turning CC off, disconnects and reconnects never summarize.
+  「新会议」 starts a new CC session; 「生成会议记录」 writes minutes from the
+  captions alone into `recording_dir/meeting-notes/` (remote voice only).
+  Captions are kept in `recording_dir/.captions/` and a session resumes if CC
+  is reopened within 10 minutes (even after a restart). CC, the interval and
+  the summarizer live in `recording_dir/.captions/settings.json`.
 - **Forgot to record?** After 2 minutes of continuous captions without a
   recording in this browser, a bar above the picture offers 「开始录制」.
 - **Display > Size** — Fit or 50–150 % (1:1 = 100 %); the picture is
