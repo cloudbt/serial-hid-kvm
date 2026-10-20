@@ -78,6 +78,9 @@ def convert_recording(source, destination=None):
         if video_codecs[:1] == ["h264"] and all(c == "aac" for c in audio_codecs):
             # Server recordings are already H.264/AAC: remux only (seconds, no quality loss).
             codec_args = ["-c", "copy"]
+        elif video_codecs[:1] == ["h264"]:
+            # Browser H.264 WebM (Opus audio): keep the video, convert only the audio.
+            codec_args = ["-c:v", "copy", "-c:a", "aac", "-b:a", "128k"]
         else:
             codec_args = ["-c:v", "libx264", "-threads", "2",
                           "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",

@@ -1984,7 +1984,12 @@ async function ensureAudioForRecording() {
 }
 
 function pickMimeType() {
+  // H.264 first: Chrome encodes it in the GPU process (likely hardware). With
+  // VP8 a 1080p tab grew to ~1.9 GB queueing frames and crashed (Out of Memory);
+  // H.264 stayed at ~0.2 GB in the same test.
   const prefs = [
+    "video/webm;codecs=h264,opus",
+    "video/webm;codecs=h264",
     "video/webm;codecs=vp8,opus",
     "video/webm;codecs=vp9,opus",
     "video/webm;codecs=vp8",
@@ -2058,7 +2063,10 @@ async function startRecordingSession() {
 
   const mimeType = pickMimeType();
   const filename = recordingFilename();
-  mediaRecorder = new MediaRecorder(recStream, mimeType ? {mimeType} : undefined);
+  // Capped bitrate keeps the encoder queue and upload small for 1080p screens.
+  const recorderOptions = {videoBitsPerSecond: 6000000, audioBitsPerSecond: 128000};
+  if (mimeType) recorderOptions.mimeType = mimeType;
+  mediaRecorder = new MediaRecorder(recStream, recorderOptions);
   // The minutes choice is fixed when recording starts and stored server-side
   // with the session, so a later dropdown change only affects the next one.
   const minutesSelect = document.getElementById("recMinutes");
