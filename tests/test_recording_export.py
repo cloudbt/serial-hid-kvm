@@ -41,6 +41,23 @@ def test_real_export_preserves_video_and_audio(tmp_path, audio):
     assert not list(tmp_path.glob("*.partial.mp4"))
 
 
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
+def test_browser_h264_webm_keeps_video_packets_and_converts_audio(tmp_path):
+    source = tmp_path / "browser-h264.webm"
+    subprocess.run([shutil.which("ffmpeg"), "-v", "error", "-f", "lavfi", "-i",
+                    "testsrc2=size=160x90:rate=25:duration=2", "-f", "lavfi", "-i",
+                    "sine=frequency=440:sample_rate=48000:duration=2",
+                    # Chrome's "webm;codecs=h264" is Matroska; ffmpeg's webm muxer refuses H.264.
+                    "-c:v", "libx264", "-c:a", "libopus", "-f", "matroska", str(source)],
+                   check=True, capture_output=True)
+    result = convert_recording(source)
+    info = json.loads(subprocess.check_output([
+        shutil.which("ffprobe"), "-v", "error", "-show_streams", "-of", "json", str(result)]))
+    codecs = sorted((s["codec_type"], s["codec_name"]) for s in info["streams"])
+    assert codecs == [("audio", "aac"), ("video", "h264")]
+    assert _timeline(shutil.which("ffprobe"), result)[0] == _timeline(shutil.which("ffprobe"), source)[0]
+
+
 def test_missing_tools_keep_source(tmp_path):
     source = tmp_path / "recording.webm"
     source.write_bytes(b"original")
