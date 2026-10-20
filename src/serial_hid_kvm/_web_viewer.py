@@ -33,7 +33,7 @@ from websockets.http11 import Response
 
 from ._audio import AudioCapture
 from ._captions import CaptionService
-from ._minutes import MinutesService
+from ._minutes import SUMMARIZERS, MinutesService
 from ._live_meeting import LiveMeeting
 from ._web_audio import RECORDING_AUDIO_MIXER_JS
 from ._web_recording_audio import RECORDING_AUDIO_CONTROLS_JS
@@ -2284,9 +2284,11 @@ function srecApply(st) {
     btn.classList.add("recording");
     if (srecState.starting) btn.textContent = "Starting…";
     else { srecTick(); srecTimer = setInterval(srecTick, 500); }
+    btn.title = srecState.started_by === "api" ? "由 API（agent/工具）启动的录制；点击停止" : "停止录制";
     recSourceSelect.disabled = true;
     const warnings = srecState.warnings || [];
-    statusEl.textContent = "Server recording · " + (srecState.encoder || "") + " · " + (srecState.fps || "") + " fps" +
+    statusEl.textContent = "Server recording" + (srecState.started_by === "api" ? "（API 启动）" : "") +
+      " · " + (srecState.encoder || "") + " · " + (srecState.fps || "") + " fps" +
       (warnings.length ? " · " + warnings.join("; ") : "");
     if (warnings.length) showHint(warnings.join("; "));
   } else if (!recording && !recFinishing && !recStarting) {
@@ -2712,6 +2714,9 @@ class WebViewerServer:
             mic_name=getattr(config, "recording_mic", "EarPods") or "",
             max_seconds=getattr(config, "recording_max_seconds", 3 * 3600),
             on_stop=self._server_recording_stopped)
+        self._srec_origin = None   # "viewer" | "api": who started the running recording
+        self._srec_saving = None   # session being saved after its stop
+        self._srec_last = None     # last finished recording (path / error), for the API
         self._sop = SopService(self)
         self._captions = CaptionService(
             audio, getattr(config, "ai_hub_url", ""), getattr(config, "ai_hub_key", None),
@@ -2988,9 +2993,11 @@ class WebViewerServer:
         state = self._server_recorder.status()
         state.pop("path", None)
         state["type"] = "srec_state"
+        if state.get("active"):
+            state["started_by"] = self._srec_origin or "viewer"
         return state
 
-    async def _start_server_recording(self, ev):
+    async def _start_server_recording(self, ev, origin="viewer"):
         """Begin a server recording; every viewer sees the new state."""
         fps = ev.get("fps", 15)
         source = ev.get("source", "mix")
@@ -3010,11 +3017,13 @@ class WebViewerServer:
             # Nothing usable was written: drop the empty session folder.
             await asyncio.to_thread(shutil.rmtree, source_path.parent, True)
             raise
+        self._srec_origin = origin
         self._meeting.note_recording()
         self._captions.begin_recording(
             session, self._recording_library.root / (Path(state["filename"]).stem + ".live.vtt"),
             state["started_epoch"])
         self._broadcast(self._server_recording_state())
+        return session
 
     def _server_recording_stopped(self, status):
         """Recorder thread callback (manual stop, 3 h limit, disk full, error)."""
@@ -3030,6 +3039,14 @@ class WebViewerServer:
 
     async def _finish_server_recording(self, status):
         session = status.get("session")
+        self._srec_saving = session
+        try:
+            self._srec_last = await self._save_server_recording(session, status)
+        finally:
+            self._srec_saving = None
+
+    async def _save_server_recording(self, session, status):
+        """Save a stopped server recording; returns what the API reports."""
         self._captions.end_recording(session)
         self._broadcast(self._server_recording_state())
         reason = status.get("stopped_reason", "manual")
@@ -3045,7 +3062,7 @@ class WebViewerServer:
         except Exception as exc:
             logger.warning("Server recording %s not saved: %s", session, exc)
             self._broadcast({"type": "srec_notice", "message": "录制没有保存：" + str(exc)})
-            return
+            return {"session": session, "saved": False, "error": str(exc), "stopped_reason": reason}
         try:
             await asyncio.to_thread(self._queue_minutes, session, source, destination)
         except Exception:
@@ -3060,6 +3077,56 @@ class WebViewerServer:
                          "recording_id": self._recording_library.identifier(destination.name)})
         self._session_exports[session] = self._export_recording(source, None, destination, session)
         logger.info("Server recording saved: %s -> %s", session, destination)
+        return {"session": session, "saved": True, "path": str(destination), "stopped_reason": reason,
+                "recording_id": self._recording_library.identifier(destination.name)}
+
+    # ---- agent API (JSON-Lines API server, same event loop) -----------------
+    # Same code paths as the viewer's buttons, so every open viewer sees the
+    # change. Long work (saving the MP4, AI summaries) never blocks a call:
+    # poll the matching *_status / meeting_points call instead.
+    def api_recording_status(self):
+        state = self._server_recording_state()
+        state.pop("type", None)
+        return {"recording": state, "saving": self._srec_saving is not None, "last": self._srec_last}
+
+    async def api_recording_start(self, fps=15, source="mix", minutes="off"):
+        if minutes not in SUMMARIZERS + ("off",):
+            raise ValueError("minutes must be one of: " + ", ".join(SUMMARIZERS + ("off",)))
+        session = await self._start_server_recording({"fps": fps, "source": source, "minutes": minutes},
+                                                     origin="api")
+        logger.info("Server recording started from the API: %s (minutes %s)", session, minutes)
+        return {"session": session, **self.api_recording_status()}
+
+    async def api_recording_stop(self):
+        if not self._server_recorder.active:
+            raise ValueError("No server recording is running")
+        # The recorder thread finishes the file; saving continues in the background.
+        await asyncio.to_thread(self._server_recorder.stop, "api", 25)
+        return self.api_recording_status()
+
+    def api_captions_status(self):
+        state = self._captions.state_message()
+        state.pop("type", None)
+        return {"available": self._captions.available, "reason": self._captions.reason, **state}
+
+    def api_captions_set(self, on):
+        self._meeting.set_cc(bool(on), "api")
+        return self.api_captions_status()
+
+    def api_meeting_points(self):
+        message = self._meeting.message()
+        message.pop("type", None)
+        return message
+
+    def api_meeting_summarize(self):
+        task = self._meeting.request_run()
+        self._meeting_jobs.add(task)
+        task.add_done_callback(self._meeting_jobs.discard)
+        return {"started": True, **self.api_meeting_points()}
+
+    async def api_meeting_minutes(self):
+        job = await asyncio.to_thread(self._meeting.generate_minutes)
+        return {"job": job["id"], "minutes": self._minutes.view(job["id"])}
 
     async def _recover_server_recordings(self):
         """Finish server sessions a crash or restart left open (file kept as is)."""
@@ -4030,7 +4097,7 @@ class WebViewerServer:
 
                 if ev_type == "srec_start":
                     try:
-                        await self._start_server_recording(ev)
+                        await self._start_server_recording(ev, origin="viewer")
                     except Exception as exc:
                         logger.warning("Server recording did not start: %s", exc)
                         await ws.send(json.dumps({"type": "srec_error", "error": str(exc)}, ensure_ascii=False))

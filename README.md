@@ -739,6 +739,31 @@ JSON Lines protocol over TCP socket. Enable with `--api`. One JSON object per li
 | `set_capture_resolution` | `width`, `height` | Change capture resolution |
 | `ping` | — | Health check |
 
+### Recording, Captions and Meeting Points (needs `--web`)
+
+The same actions as the web viewer's buttons, run on the event loop the
+viewers share, so every open viewer sees the change (a recording started here
+shows 「API 启动」). Long work never blocks a call: saving the MP4 and AI
+summaries continue on the server — poll the status method. Only
+`meeting_summarize` and `meeting_minutes` call AI; `recording_start` queues
+minutes only when `minutes` names a summarizer.
+
+| Method | Parameters | Description |
+|--------|-----------|-------------|
+| `recording_start` | `fps?` (15/30), `source?` (`mix`/`hdmi`/`mic`/`none`), `minutes?` (`off` default, `agy`/`codex`/`mac-qwen`) | Start a server recording; one per Target, max 3 h |
+| `recording_stop` | — | Stop it; the MP4 is saved in the background |
+| `recording_status` | — | `{recording:{active, elapsed, started_by, ...}, saving, last:{saved, path, recording_id} or {error}}` |
+| `captions_set` | `on` (bool) | CC on/off for every viewer (turning it off never summarizes) |
+| `captions_status` | — | `{available, on, since, state, detail}` |
+| `meeting_points` | — | Latest meeting points of the current CC session (no AI call) |
+| `meeting_summarize` | — | Like 「立即总结」: starts a summary, poll `meeting_points` |
+| `meeting_minutes` | — | Like 「生成会议记录」: queues minutes from the captions |
+
+```
+→  {"id":"3", "method":"recording_start", "params":{"source":"hdmi"}}
+←  {"id":"3", "ok":true, "result":{"session":"…", "recording":{"active":true, "started_by":"api", …}, "saving":false, "last":null}}
+```
+
 ### Text Tags
 
 `type_text` supports inline tags for special keys:
