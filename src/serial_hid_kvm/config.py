@@ -75,6 +75,10 @@ class Config:
         # WASAPI preferred; empty = no mic) and the automatic stop limit.
         self.recording_mic: str = "EarPods"
         self.recording_max_seconds: int = 3 * 3600
+        # Browser microphone uplink (Mic button in the web viewer): host
+        # output device that plays the viewer's microphone, as part of its
+        # name (WASAPI preferred) or an index; empty = feature off.
+        self.uplink_output: str = ""
         # Empty: enable only for a recordings/ folder beside knowledge/sops/.
         # 'off' disables the local SOP service explicitly.
         self.sop_project_dir: str = ""
@@ -138,7 +142,7 @@ _FILE_KEYS = {
     "web_enabled", "web_host", "web_port", "web_fps", "web_quality",
     "web_password", "web_tls_cert", "web_tls_key",
     "webrtc_fps", "webrtc_bitrate",
-    "recording_dir", "recording_mic", "recording_max_seconds",
+    "recording_dir", "recording_mic", "recording_max_seconds", "uplink_output",
     "sop_project_dir", "sop_agy_executable", "sop_segment_seconds", "sop_agy_timeout",
     "ai_hub_url", "ai_hub_key", "captions_enabled", "captions_language", "captions_summary_interval",
     "captions_mic", "captions_meeting_gap",
@@ -228,6 +232,7 @@ _ENV_MAP = {
     "SHKVM_WEBRTC_BITRATE": "webrtc_bitrate",
     "SHKVM_RECORDING_DIR": "recording_dir",
     "SHKVM_RECORDING_MIC": "recording_mic",
+    "SHKVM_UPLINK_OUTPUT": "uplink_output",
     "SHKVM_RECORDING_MAX_SECONDS": "recording_max_seconds",
     "SHKVM_SOP_PROJECT_DIR": "sop_project_dir",
     "SHKVM_SOP_AGY_EXECUTABLE": "sop_agy_executable",
@@ -308,6 +313,7 @@ def _apply_args(config: Config, args):
         "recording_dir": "recording_dir",
         "recording_mic": "recording_mic",
         "recording_max_seconds": "recording_max_seconds",
+        "uplink_output": "uplink_output",
         "sop_project_dir": "sop_project_dir",
         "sop_agy_executable": "sop_agy_executable",
         "sop_segment_seconds": "sop_segment_seconds",

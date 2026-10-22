@@ -3,7 +3,7 @@ const {controls,pool}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const setup=`
 let recording=false,recFinishing=false,recStarting=false,recAudioSession=null,recAudioPreview=null;
 let recInputDevices=[];
-const audioCfg=null,playGain=null,audioOn=false,IS_LAN=true;
+const audioCfg=serverAudio,playGain=null,audioOn=false,IS_LAN=true;
 const elements={};
 class Option{constructor(label,value){this.label=label;this.value=value;}}
 function element(id){return elements[id]??=(
@@ -25,8 +25,8 @@ class RecordingAudioMixer{
 const makeDevice=(deviceId,label)=>({kind:'audioinput',deviceId,label});
 const mic=makeDevice('host-earpods','ヘッドセット (EarPods) (05ac:110b)');
 const first=[mic,makeDevice('long057af2','デジタル オーディオ インターフェイス (USB3 Digital Audio) (345f:2131)'),makeDevice('longd0c23b','デジタル オーディオ インターフェイス (3- USB3 Digital Audio) (345f:2131)')];
-async function create(initial,devices,target){
- const c=vm.createContext({initial,devices,Option:undefined});
+async function create(initial,devices,target,serverAudio=null){
+ const c=vm.createContext({initial,devices,serverAudio,Option:undefined});
  vm.runInContext(setup+pool+controls,c);
  await new Promise(setImmediate);
  vm.runInContext('setRecordingAudioTarget('+JSON.stringify(target)+')',c);
@@ -63,4 +63,15 @@ async function create(initial,devices,target){
  await assert.rejects(()=>ambiguous.get('openRecordingAudio()'),/Default Target1 HDMI not available/);
  const missingMic=await create({source:'mic'},[first[1]],'target1');
  await assert.rejects(()=>missingMic.get('openRecordingAudio()'),/EarPods microphone not available/);
+ // A phone/iPad (no local capture card) falls back to the server's HDMI audio.
+ const phone=await create({source:'hdmi'},[makeDevice('phone-mic','iPhone Microphone')],'target1',{sampleRate:48000,channels:2});
+ assert(phone.get('recHdmiSelect.options[0].label').includes('Target1 HDMI (server capture)'));
+ assert.equal(phone.get('selectedRecordingDevice("hdmi")'),'server');
+ await phone.get('openRecordingAudio()');
+ assert.equal(phone.get('capturedConfig.inputs.hdmi.deviceId'),'server');
+ // On the Host the local card still wins over the server capture.
+ const host=await create({source:'hdmi'},first,'target1',{sampleRate:48000,channels:2});
+ assert.equal(host.get('selectedRecordingDevice("hdmi")'),'long057af2');
+ // The microphone never falls back to the server.
+ await assert.throws(()=>phone.get('selectedRecordingDevice("mic")'),/EarPods microphone not available/);
 })().catch(e=>{console.error(e);process.exitCode=1;});

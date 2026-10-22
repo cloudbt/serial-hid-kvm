@@ -29,6 +29,18 @@ class WebAudioMixerTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed for audio JS tests")
+    def test_hdmi_playback_worklet_buffering(self):
+        import re
+        from serial_hid_kvm._web_viewer import _VIEWER_HTML
+        worklet = re.search(r"const WORKLET_SRC = `(.*?)`;", _VIEWER_HTML, re.S).group(1)
+        result = subprocess.run(
+            [shutil.which("node"), str(Path(__file__).with_name("web_audio_worklet.cjs"))],
+            input=json.dumps({"worklet": worklet}),
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -43,6 +43,7 @@ from ._recording_library import RecordingLibrary
 from ._server_recorder import FPS_CHOICES, SOURCES as SERVER_REC_SOURCES, ServerRecorder
 from ._sop_http import SopService, local_request
 from ._sop_viewer import install_sop_viewer
+from ._uplink import TAG as UPLINK_TAG, UplinkPlayer, parse_frame as parse_uplink_frame
 from .hid_protocol import (
     build_keyboard_report,
     build_mouse_abs_packet,
@@ -302,6 +303,10 @@ body.tb-hidden #container{height:100%}
 #btnMonitorVolume{display:none}
 #btnHdmiMonitor[aria-pressed=false]{color:#9daec5}
 #btnHdmiMonitor.monitor-error{border-color:#e2a96d;color:#ffd3a0}
+#btnMic[hidden]{display:none}
+#toolbar #btnMic.active{background:#8b2632;border-color:#d65c69;color:#fff}
+#btnMic.mic-unusable{opacity:.45;cursor:not-allowed}
+@media(max-width:600px){.mic-name{display:none}}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 @media(max-width:900px){#btnMonitorVolume{display:block}#recMonitorGainValue{display:none}#hdmiVolumePanel{display:none;position:absolute;top:34px;right:0;padding:14px;background:#18263b;border:1px solid #384b66;border-radius:7px;box-shadow:0 10px 30px #0008;z-index:12}#hdmiVolumePanel.open{display:block}#recMonitorGain{width:140px}}
 .status-group{margin-left:auto;min-width:0;flex-shrink:1;overflow:visible}
@@ -508,6 +513,7 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
       </div>
     </details>
   </div>
+  <button id="btnMic" type="button" aria-pressed="false" aria-label="Send microphone to Target" hidden>🎤<span class="mic-name"> Mic</span></button>
   <div class="hdmi-monitor-controls" id="hdmiMonitorControls" role="group" aria-label="HDMI listening">
     <button id="btnHdmiMonitor" type="button" aria-pressed="false" aria-label="Listen to Target HDMI" title="Listen to Target HDMI through Host default playback device. Does not change recorded audio.">🎧<span class="hdmi-monitor-name"> HDMI</span></button>
     <div class="hdmi-monitor-volume">
@@ -697,6 +703,7 @@ function connect() {
   ws.onclose = (ev) => {
     const interrupted = recording || recFinishing;
     recordingConnectionLost();
+    if (micWanted) micStop("连接断开，麦克风上行已关闭");
     if (ccOn) ccSetState("connecting", "");
     statusEl.textContent = recording
       ? "Picture disconnected — recording continues locally; upload will resume"
@@ -752,6 +759,8 @@ function connect() {
           minutesConfigure(msg.minutes || null);
           ccConfigure(msg.captions || null);
           srecConfigure(msg.server_recording || null);
+          micCfg = msg.uplink || null;
+          micRender();
           if (msg.webrtc === false) {
             const b = document.getElementById("btnRtc");
             b.disabled = true;
@@ -807,6 +816,7 @@ function connect() {
           recordingUploadEvent(msg);
         }
         else if (msg.type === "srec_state") { srecApply(msg); }
+        else if (msg.type === "uplink_state") { micApply(msg); }
         else if (msg.type === "srec_error") {
           srecBusy = false;
           statusEl.textContent = "录制没有开始：" + msg.error;
@@ -1228,28 +1238,111 @@ let audioNode = null;
 let audioCfg = null;
 let playGain = null;   // controls speaker playback volume (mute = 0)
 let recDest = null;    // MediaStreamDestination feeding the recorder
+let serverMonitorGain = null;  // HDMI listening of server audio: audioNode → speakers
+let audioStats = null;         // latest worklet report {underruns, dropped, bufferedMs, playing}
 let audioOn = false;   // listening starts only from the toolbar HDMI button
 
+// HDMI PCM player: preallocated ring buffer of interleaved int16 frames from
+// the socket (converted here, off the main thread). It prebuffers before the
+// first sample and after every underrun and fades out into an underrun and
+// back in afterwards (no hard cut to 0). Latency is trimmed back to the
+// prebuffer (fade out, skip, fade in) when the buffer passes maxMs, or when
+// its lowest level over a second stayed well above the prebuffer (a burst
+// backlog or clock drift that the jitter never needed). process() allocates
+// nothing.
 const WORKLET_SRC = `
 class P extends AudioWorkletProcessor {
-  constructor() {
+  constructor(o) {
     super();
-    this.b = new Float32Array(0);
-    this.port.onmessage = e => {
-      const o = this.b, n = e.data;
-      const m = new Float32Array(o.length + n.length);
-      m.set(o); m.set(n, o.length);
-      this.b = m;
-    };
+    const p = (o && o.processorOptions) || {};
+    this.ch = p.channels || 2;
+    this.max = Math.max(1, Math.round(sampleRate * (p.maxMs || 300) / 1000));
+    this.pre = Math.min(this.max, Math.max(1, Math.round(sampleRate * (p.prebufferMs || 100) / 1000)));
+    this.cap = this.max + Math.round(sampleRate * 0.5);  // room above the soft limit
+    this.fade = Math.max(1, Math.round(sampleRate * 0.005));
+    this.margin = Math.round(sampleRate * 0.05);
+    this.win = Math.max(1, Math.round(sampleRate / 128));  // quanta per second
+    this.buf = new Float32Array(this.cap * this.ch);
+    this.r = 0;
+    this.n = 0;
+    this.playing = false;
+    this.g = 0;
+    this.trim = false;
+    this.q = 0;
+    this.low = Infinity;
+    this.underruns = 0;
+    this.dropped = 0;
+    this.trims = 0;
+    this.reportAt = 0;
+    this.port.onmessage = (e) => this.push(new Int16Array(e.data));
+  }
+  push(pcm) {
+    const ch = this.ch, frames = Math.floor(pcm.length / ch);
+    if (!frames) return;
+    let start = 0, count = frames;
+    if (count > this.cap) { start = count - this.cap; count = this.cap; }
+    const over = this.n + count - this.cap;
+    if (over > 0) {
+      // Physically full (only when nothing plays for a long time): drop the
+      // oldest and restart the gain ramp.
+      this.r = (this.r + over) % this.cap;
+      this.n -= over;
+      this.dropped += over;
+      this.g = 0;
+    }
+    let w = (this.r + this.n) % this.cap;
+    for (let f = start; f < start + count; f++) {
+      const o = w * ch, i = f * ch;
+      for (let c = 0; c < ch; c++) this.buf[o + c] = pcm[i + c] / 32768;
+      if (++w === this.cap) w = 0;
+    }
+    this.n += count;
+    if (this.n > this.max) this.trim = true;
   }
   process(ins, outs) {
-    const out = outs[0], ch = out.length, fr = out[0].length;
-    const need = fr * ch;
-    if (this.b.length >= need) {
-      for (let i = 0; i < fr; i++)
-        for (let c = 0; c < ch; c++)
-          out[c][i] = this.b[i * ch + c];
-      this.b = this.b.slice(need);
+    const out = outs[0], oc = out.length, fr = out[0].length, ch = this.ch;
+    const step = 1 / this.fade;
+    let i = 0;
+    if (!this.playing && this.n >= this.pre) { this.playing = true; this.g = 0; this.q = 0; this.low = Infinity; }
+    if (this.playing) {
+      const start = this.n, underrun = start < fr;
+      for (; i < fr && this.n > 0; i++) {
+        if (underrun) {
+          this.g = Math.min(this.g, (this.n - 1) / Math.max(1, start));
+        } else if (this.trim) {
+          this.g = Math.max(0, this.g - step);
+          if (this.g === 0) {
+            const skip = Math.max(0, this.n - this.pre);
+            this.r = (this.r + skip) % this.cap;
+            this.n -= skip;
+            this.dropped += skip;
+            this.trims++;
+            this.trim = false;
+          }
+        } else if (this.g < 1) {
+          this.g = Math.min(1, this.g + step);
+        }
+        const o = this.r * ch;
+        for (let c = 0; c < oc; c++) out[c][i] = this.buf[o + (c < ch ? c : ch - 1)] * this.g;
+        if (++this.r === this.cap) this.r = 0;
+        this.n--;
+      }
+      if (underrun) {
+        this.playing = false; this.g = 0; this.trim = false; this.underruns++;
+      } else {
+        if (this.n < this.low) this.low = this.n;
+        if (++this.q >= this.win) {
+          if (this.low > this.pre + this.margin) this.trim = true;
+          this.q = 0;
+          this.low = Infinity;
+        }
+      }
+    }
+    for (let c = 0; c < oc; c++) for (let k = i; k < fr; k++) out[c][k] = 0;
+    if (currentTime >= this.reportAt) {
+      this.reportAt = currentTime + 1;
+      this.port.postMessage({underruns: this.underruns, dropped: this.dropped, trims: this.trims,
+        bufferedMs: Math.round(this.n * 1000 / sampleRate), playing: this.playing});
     }
     return true;
   }
@@ -1298,27 +1391,50 @@ async function enableAudioPlayback() {
 // Build the audio graph once.  audioNode → playGain → speakers (gain gates
 // playback) and audioNode → recDest (always full-volume, for the recorder),
 // so recording captures audio even when speaker playback is muted.
-async function startAudio() {
-  if (!audioCfg || audioCtx) return;
-  audioCtx = new AudioContext({sampleRate: audioCfg.sampleRate});
-  const blob = new Blob([WORKLET_SRC], {type: "application/javascript"});
-  const url = URL.createObjectURL(blob);
-  await audioCtx.audioWorklet.addModule(url);
-  URL.revokeObjectURL(url);
-  audioNode = new AudioWorkletNode(audioCtx, "p",
-    {outputChannelCount: [audioCfg.channels]});
-  playGain = audioCtx.createGain();
-  playGain.gain.value = audioOn ? 1 : 0;
-  audioNode.connect(playGain);
-  playGain.connect(audioCtx.destination);
+// Shared by every caller: the context is created synchronously on the first
+// call (so a click handler can create it inside the gesture), the worklet
+// loads after that; awaiting the same promise means "graph ready".
+let audioStarting = null;
+function startAudio() {
+  if (!audioCfg) return Promise.resolve();
+  if (!audioStarting) audioStarting = (async () => {
+    audioCtx = new AudioContext({sampleRate: audioCfg.sampleRate});
+    const blob = new Blob([WORKLET_SRC], {type: "application/javascript"});
+    const url = URL.createObjectURL(blob);
+    await audioCtx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+    // A remote link jitters more: start later and allow more backlog.
+    audioNode = new AudioWorkletNode(audioCtx, "p", {
+      outputChannelCount: [audioCfg.channels],
+      processorOptions: {channels: audioCfg.channels,
+                         prebufferMs: IS_LAN ? 100 : 150, maxMs: IS_LAN ? 300 : 400}});
+    audioNode.port.onmessage = (e) => { audioStats = e.data; };
+    playGain = audioCtx.createGain();
+    playGain.gain.value = audioOn ? 1 : 0;
+    audioNode.connect(playGain);
+    playGain.connect(audioCtx.destination);
+    serverMonitorGain = audioCtx.createGain();
+    serverMonitorGain.gain.value = 0;
+    audioNode.connect(serverMonitorGain);
+    serverMonitorGain.connect(audioCtx.destination);
+  })().catch((e) => {
+    audioStarting = null; audioCtx = null; audioNode = null; playGain = null; serverMonitorGain = null;
+    throw e;
+  });
+  return audioStarting;
+}
+
+// Call synchronously from a click/tap: iOS only lets a context start there.
+function unlockServerAudio() {
+  if (!audioCfg) return;
+  startAudio().catch(() => {});
+  if (audioCtx && audioCtx.state !== "running") audioCtx.resume().catch(() => {});
 }
 
 function feedAudio(buf) {
-  if (!audioNode) return;
-  const i16 = new Int16Array(buf);
-  const f32 = new Float32Array(i16.length);
-  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768.0;
-  audioNode.port.postMessage(f32, [f32.buffer]);
+  // int16 → float happens in the worklet; hand the bytes over (transfer).
+  if (!audioNode || buf.byteLength & 1) return;
+  audioNode.port.postMessage(buf, [buf]);
 }
 
 document.getElementById("btnAudio").addEventListener("click", async () => {
@@ -1337,6 +1453,166 @@ document.getElementById("btnAudio").addEventListener("click", async () => {
   }
   btn.textContent = (audioOn ? "\u{1f50a}" : "\u{1f507}") + " Audio";
   btn.classList.toggle("active", audioOn);
+  container.focus();
+});
+
+// --- Microphone uplink (Mic button) ---
+// The browser microphone (echo cancellation / noise suppression on) is sent
+// to the server as binary 0x12 | u32 BE sample rate | int16 LE mono PCM in
+// 20 ms frames; the server resamples and plays it on its uplink output device
+// (TargetPC1: Host headphone jack wired to the Target microphone input).
+// One viewer at a time; getUserMedia and AudioWorklet need a secure context
+// (https or localhost), so over plain http the button stays greyed out.
+const MIC_WORKLET_SRC = `
+class M extends AudioWorkletProcessor {
+  constructor(o) {
+    super();
+    this.n = o.processorOptions.n;
+    this.b = new Int16Array(this.n);
+    this.i = 0;
+  }
+  process(ins) {
+    const x = ins[0] && ins[0][0];
+    if (x) for (let k = 0; k < x.length; k++) {
+      const v = Math.max(-1, Math.min(1, x[k]));
+      this.b[this.i++] = v < 0 ? v * 32768 : v * 32767;
+      if (this.i === this.n) {
+        this.port.postMessage(this.b.buffer, [this.b.buffer]);
+        this.b = new Int16Array(this.n);
+        this.i = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("mic-up", M);
+`;
+const MIC_SECURE = window.isSecureContext && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+  && typeof AudioWorkletNode !== "undefined";
+const MIC_MAX_BUFFERED = 64 * 1024;  // drop frames instead of queueing latency
+const MIC_HTTPS_HINT = "麦克风上行需要 https（或 localhost）访问，http 下浏览器不允许使用麦克风";
+const MIC_BUSY_HINT = "麦克风上行正被另一个 viewer 使用";
+// iOS routes playback to the earpiece (quiet) while the microphone is open.
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+  || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const MIC_IOS_HINT = "麦克风上行已开启。iPhone/iPad 开着麦克风时声音会走听筒、音量变小，建议戴耳机";
+let micCfg = null;        // hello.uplink / uplink_state: {available, device, on, busy}
+let micCtx = null, micStream = null, micNode = null;
+let micWanted = false;    // switched on here (opening or live)
+let micRequested = false; // "uplink on" sent to the server
+let micLive = false;      // server confirmed this viewer is the sender
+let micGen = 0;           // invalidates an in-flight start after a stop
+
+function micRender() {
+  const btn = document.getElementById("btnMic");
+  const cfg = micCfg || {};
+  const busy = !!cfg.busy && !micLive;
+  btn.hidden = !cfg.available;
+  btn.classList.toggle("active", micLive);
+  btn.classList.toggle("mic-unusable", !MIC_SECURE || (busy && !micWanted));
+  btn.setAttribute("aria-pressed", micWanted ? "true" : "false");
+  btn.setAttribute("aria-disabled", !MIC_SECURE || busy ? "true" : "false");
+  const device = cfg.device || "Host output";
+  btn.title = !MIC_SECURE ? MIC_HTTPS_HINT
+    : busy ? MIC_BUSY_HINT
+    : micLive ? "麦克风上行中 → " + device + "（点击关闭）" + (IS_IOS ? "。开着麦克风时 iOS 播放走听筒，建议戴耳机" : "")
+    : micWanted ? "正在打开麦克风…"
+    : "把本机麦克风送到 Target（经 " + device + "）";
+}
+
+function micSend(rate, buf) {
+  if (!micLive || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (ws.bufferedAmount > MIC_MAX_BUFFERED) return;
+  const pcm = new Uint8Array(buf);
+  const pkt = new Uint8Array(5 + pcm.length);
+  pkt[0] = 0x12;
+  new DataView(pkt.buffer).setUint32(1, rate);
+  pkt.set(pcm, 5);
+  ws.send(pkt.buffer);
+}
+
+async function micStart() {
+  if (micWanted) return;
+  const gen = ++micGen;
+  micWanted = true;
+  syncAudioSession();
+  micRender();
+  try {
+    // Created inside the click so the context may start running (iOS).
+    micCtx = new AudioContext();
+    micCtx.resume().catch(() => {});
+    const stream = await navigator.mediaDevices.getUserMedia({audio: {
+      echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1}});
+    if (gen !== micGen) { stream.getTracks().forEach((t) => t.stop()); return; }
+    micStream = stream;
+    const url = URL.createObjectURL(new Blob([MIC_WORKLET_SRC], {type: "application/javascript"}));
+    try { await micCtx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+    if (gen !== micGen) return;
+    const rate = micCtx.sampleRate;
+    const source = micCtx.createMediaStreamSource(stream);
+    micNode = new AudioWorkletNode(micCtx, "mic-up", {
+      numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
+      channelCount: 1, channelCountMode: "explicit",
+      processorOptions: {n: Math.round(rate / 50)}});
+    micNode.port.onmessage = (e) => micSend(rate, e.data);
+    // A muted sink keeps the graph pulling without playing the mic locally.
+    const sink = micCtx.createGain();
+    sink.gain.value = 0;
+    source.connect(micNode);
+    micNode.connect(sink);
+    sink.connect(micCtx.destination);
+    stream.getAudioTracks().forEach((t) => t.addEventListener("ended", () => {
+      if (gen === micGen) micStop("麦克风已断开，上行已关闭");
+    }));
+    micRequested = true;
+    wsSend({type: "uplink", on: true});
+  } catch (e) {
+    if (gen !== micGen) return;
+    micStop("麦克风打开失败：" + ((e && (e.message || e.name)) || e));
+  }
+}
+
+function micStop(hint) {
+  micGen++;
+  if (micRequested && ws && ws.readyState === WebSocket.OPEN) wsSend({type: "uplink", on: false});
+  micRequested = false;
+  micWanted = false;
+  micLive = false;
+  syncAudioSession();
+  if (micNode) {
+    micNode.port.onmessage = null;
+    try { micNode.disconnect(); } catch (e) {}
+    micNode = null;
+  }
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  if (micCtx) { micCtx.close().catch(() => {}); micCtx = null; }
+  micRender();
+  if (hint) showHint(hint);
+}
+
+function micApply(msg) {
+  micCfg = msg;
+  if (msg.error && micRequested) {
+    micStop(msg.error === "busy" ? MIC_BUSY_HINT
+      : msg.error === "unavailable" ? "服务器未配置麦克风上行输出设备"
+      : "主机输出设备打开失败：" + msg.error);
+    return;
+  }
+  if (msg.on && micRequested && !micLive) {
+    micLive = true;
+    showHint(IS_IOS ? MIC_IOS_HINT : "麦克风上行已开启 → " + (msg.device || "Host output"));
+  } else if (!msg.on && micLive) {
+    micStop("麦克风上行已被服务器关闭");
+    return;
+  }
+  micRender();
+}
+
+document.getElementById("btnMic").addEventListener("click", () => {
+  if (!MIC_SECURE) showHint(MIC_HTTPS_HINT);
+  else if (micWanted) micStop("");
+  else if (micCfg && micCfg.busy) showHint(MIC_BUSY_HINT);
+  else micStart();
   container.focus();
 });
 
@@ -2061,7 +2337,7 @@ async function maybeResumeRecording() {
 
 async function ensureAudioForRecording() {
   if (!audioCfg) return;            // no audio device on this server
-  if (!audioCtx) await startAudio();
+  await startAudio();
   if (audioCtx.state === "suspended") await audioCtx.resume();
   if (!recDest) {
     recDest = audioCtx.createMediaStreamDestination();
@@ -2784,6 +3060,12 @@ class WebViewerServer:
             getattr(config, "captions_language", "auto"), getattr(config, "captions_enabled", True),
             mic=(lambda: _open_mic(mic_name)) if mic_name else None, mic_name=mic_name)
         self._minutes = MinutesService(config, self._recording_library)
+        # Browser microphone uplink (Mic button): one viewer at a time plays
+        # its microphone on the configured host output device.
+        uplink_name = (getattr(config, "uplink_output", "") or "").strip()
+        self._uplink = UplinkPlayer(uplink_name) if uplink_name else None
+        self._uplink_owner = None  # the ws currently sending, or None
+        self._uplink_lock = asyncio.Lock()
         self._meeting = LiveMeeting(config.recording_dir, self._captions, self._minutes,
                                     getattr(config, "captions_summary_interval", 0),
                                     getattr(config, "captions_meeting_gap", 30))
@@ -2886,6 +3168,9 @@ class WebViewerServer:
                 pass
             self._meeting_task = None
         await self._captions.close()
+        if self._uplink is not None:
+            self._uplink_owner = None
+            await self._uplink_call(self._uplink.close)
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -3046,6 +3331,62 @@ class WebViewerServer:
         if entry is None:
             raise ValueError("Recording no longer exists")
         return self._minutes.retry(key, summarizer, source=entry["path"], output_stem=Path(entry["name"]).stem)
+
+    # ---- browser microphone uplink ----------------------------------------
+    def _uplink_view(self, ws) -> dict:
+        """Uplink state as one viewer sees it (``on`` = this viewer sends)."""
+        owner, player = self._uplink_owner, self._uplink
+        return {"available": player is not None,
+                "device": (player.device_label or player.device_name) if player else "",
+                "on": owner is not None and owner is ws,
+                "busy": owner is not None and owner is not ws}
+
+    def _publish_uplink(self):
+        """Every viewer's Mic button follows ownership changes."""
+        async def send(ws):
+            try:
+                await ws.send(json.dumps({"type": "uplink_state", **self._uplink_view(ws)},
+                                         ensure_ascii=False))
+            except Exception:
+                pass
+        for ws in list(self._viewers):
+            asyncio.get_running_loop().create_task(send(ws))
+
+    async def _uplink_call(self, fn):
+        """Run a blocking device call on the player's own thread (WASAPI)."""
+        executor = getattr(self._uplink, "executor", None)
+        return await asyncio.get_running_loop().run_in_executor(executor, fn)
+
+    async def _uplink_start(self, ws):
+        """Make *ws* the sending viewer; a second viewer gets ``error: busy``."""
+        error = None
+        async with self._uplink_lock:
+            if self._uplink is None:
+                error = "unavailable"
+            elif self._uplink_owner is not None and self._uplink_owner is not ws:
+                error = "busy"
+            elif self._uplink_owner is None:
+                try:
+                    await self._uplink_call(self._uplink.open)
+                    self._uplink_owner = ws
+                except Exception as exc:
+                    logger.warning("Mic uplink unavailable: %s", exc)
+                    error = str(exc) or "output device failed"
+        if error is not None:
+            await ws.send(json.dumps({"type": "uplink_state", **self._uplink_view(ws),
+                                      "error": error}, ensure_ascii=False))
+            return
+        logger.info("Mic uplink started by %s", ws.remote_address)
+        self._publish_uplink()
+
+    async def _uplink_stop(self, ws):
+        """Release the uplink if *ws* owns it (button off or disconnect)."""
+        async with self._uplink_lock:
+            if self._uplink is None or self._uplink_owner is not ws:
+                return
+            self._uplink_owner = None
+            await self._uplink_call(self._uplink.close)
+        self._publish_uplink()
 
     def _publish_meeting(self, message):
         """Send live_summary to every viewer; callable from worker threads too."""
@@ -3308,6 +3649,7 @@ class WebViewerServer:
                             "default": self._meeting.summarizer},
                 "server_recording": {"available": True, "fps": list(FPS_CHOICES),
                                      "state": self._server_recording_state()},
+                "uplink": self._uplink_view(ws),
             }))
 
             # Tell the client which capture device the server uses, so direct
@@ -3372,6 +3714,7 @@ class WebViewerServer:
             self._set_captions(state, False)
             self._viewers.discard(ws)
             self._clients.discard(ws)
+            await self._uplink_stop(ws)
             await self._stop_webrtc(state)
             await self._release_stream(state)
             logger.info("Web client disconnected from %s (%s total); code=%s reason=%s",
@@ -3973,6 +4316,13 @@ class WebViewerServer:
                 # Binary frames from the client are screen-recording chunks
                 # (tag byte 0x10 + WebM data), written to the open recording.
                 if not isinstance(message, str):
+                    # Microphone uplink PCM: only the owning viewer's frames play.
+                    if len(message) >= 1 and message[0] == UPLINK_TAG:
+                        if self._uplink_owner is ws:
+                            frame = parse_uplink_frame(message)
+                            if frame is not None:
+                                self._uplink.feed(*frame)
+                        continue
                     if upload_session and len(message) > 5 and message[0] == 0x11:
                         try:
                             sequence = int.from_bytes(message[1:5], "big")
@@ -4049,6 +4399,13 @@ class WebViewerServer:
                     except (OSError, ValueError) as exc:
                         result = {"type":"recordings_action", "error":str(exc)}
                     await ws.send(json.dumps(result))
+                    continue
+
+                if ev_type == "uplink":
+                    if ev.get("on"):
+                        await self._uplink_start(ws)
+                    else:
+                        await self._uplink_stop(ws)
                     continue
 
                 if ev_type == "captions":

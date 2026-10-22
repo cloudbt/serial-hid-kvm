@@ -85,6 +85,44 @@
   recording. `recDest` taps `audioNode` before the gain so recording always has
   sound regardless of the mute button.
 
+- HDMI listening/recording "auto" input = this Target's capture card only
+  when the browser runs on the Host (`recordingDefaultDevice`); anywhere else
+  (phone, iPad) `recordingAutoDevice` falls back to `"server"` (the socket's
+  `0x02` PCM) when `audioCfg` exists. Before that, phones got "Default …
+  not available" and heard nothing.
+- Server HDMI listening must play inside `audioCtx` (worklet →
+  `serverMonitorGain` → destination, `openServerHdmiMonitor`). Bridging it
+  through `recDest` (MediaStreamDestination) into the mixer's second
+  context was silent on iPhone unless the Mic (a capture session) was open,
+  and popped/crackled when it was. Recording still taps `recDest`; a local
+  capture card still goes through the mixer.
+- The HDMI worklet is a preallocated ring buffer (int16 in, converted in the
+  worklet): 100 ms prebuffer (150 ms remote) at start and after every
+  underrun, 5 ms fades in/out, oldest audio dropped above 300/400 ms. Never
+  slice/concat per quantum (GC glitches). Stats arrive as `audioStats`.
+  Tests: `tests/web_audio_worklet.cjs`.
+- iOS `navigator.audioSession.type` (`syncAudioSession`): "playback" while
+  only listening (speaker, ignores the silent switch), "play-and-record"
+  while the Mic is on, "auto" otherwise.
+- iOS starts an AudioContext only from inside the tap: the HDMI button
+  creates the mixer context (`gestureAudioContext` → `mixer.open({context})`)
+  and the server-PCM context (`unlockServerAudio` → memoised `startAudio()`,
+  whose context is created synchronously) before the first `await`. With the
+  Mic on, iOS plays through the earpiece (quiet) — the Mic hint says so.
+- WASAPI streams (PortAudio/sounddevice): once any thread has opened a
+  stream (e.g. the HDMI `AudioCapture` at startup), opening one on a thread
+  WITHOUT COM initialised fails every time with "Unanticipated host error
+  ... WdmSyncIoctl" (stale WDM-KS text) - input streams too. The mic uplink
+  opens/closes only on its own single-thread `executor` whose initializer
+  calls `CoInitializeEx` (`_uplink._init_com`, `_uplink_call`). Other code
+  opening streams from worker threads (captions mic, recording mic) is
+  exposed to the same failure.
+- E2E for the uplink without a meeting: headless Chrome with
+  `--use-file-for-fake-audio-capture=<wav>` (use a sweep/AM tone; Chrome's
+  noise suppression eats steady tones and the default fake beep is too short),
+  then grab TargetPC1 frames via the 9329 API while its Sound control panel
+  Recording tab shows the Headset Microphone level meter.
+
 ## Launcher (`Start-NanoKvmKvmApi.ps1`)
 - Audio auto-detection shells out to a slow PnP/WMI query (~3-4s), delaying the
   port bind. Use a **poll-until-deadline** readiness check, not a fixed

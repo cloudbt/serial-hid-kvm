@@ -17,6 +17,7 @@ Defined in `_web_viewer.py`: client side in the `_VIEWER_HTML` JS (`ws.onmessage
 | server→client | `0x02` | PCM int16 LE | audio chunk |
 | client→server | `0x10` | WebM bytes | recording chunk (appended to file) |
 | client→server | `0x11` | u32 BE sequence + WebM bytes | resumable recording-session block (acked by `rec_ack`) |
+| client→server | `0x12` | u32 BE sample rate + int16 LE mono PCM (20 ms) | microphone uplink; played only while this viewer owns the uplink (`_uplink.parse_frame` rejects malformed frames) |
 
 Send pattern (server): `await ws.send(b"\x01" + jpeg_bytes)`.
 Read pattern (client): `view[0]` is the tag, `ev.data.slice(1)` is payload.
@@ -52,6 +53,7 @@ Client→server binary is handled at the top of `_recv_input` (checks
 | `minutes_retry` | `id` (recording id), `summarizer?` | retry a failed minutes job from its last good step, re-summarize a done one with another summarizer, or create a job for an older recording; reply `minutes_action` |
 | `recordings_list` | — | reply `recordings_list` (items carry `minutes` status; `meeting_notes` lists caption-only minutes) |
 | `live_summary` | `action` (`run` / `set_interval` / `set_summarizer` / `minutes` / `sync`), `minutes?` (interval: 0/3/5/10), `summarizer?` (`agy`/`codex`/`mac-qwen`/`off`, accepted with any action) | live meeting points of the current CC session: `run` = summarize now (never concurrent; failures come back as `notice`; with CC off it (re)runs the final summary - this is the 重试 button), `set_interval` = server-wide auto-summary interval (persisted in `.captions/settings.json`), `minutes` = queue minutes from this session's captions; every action is answered/broadcast as `live_summary` |
+| `uplink` | `on` (bool) | Mic button: `on` claims the server-wide single uplink (opens `uplink_output` via `UplinkPlayer`), `off` releases it (also on disconnect). Reply/broadcast `uplink_state` |
 | `captions_new_meeting` | — | finalize the current CC session and start a new one (broadcast `live_summary` with the new `session`) |
 
 `send(obj)` is gated by view-only; `wsSend(obj)` is raw (use for control msgs
@@ -76,6 +78,7 @@ like `stream`, and recording uses `ws.send` directly).
 | `caption` | `seq`,`t0`,`t1` (s from hub stream start),`text`,`lang`,`final`,`speaker` (`remote`/`me`),`at`/`end` (epoch ms),`replay?` | `final: false` = interim (overlay only; later interim and the final with the same `seq` replace it in place). Finals go to the overlay (max 2 lines) and history. `replay: true` = recent finals re-sent on subscribe (history only) |
 | `live_summary` | `state` (`idle`/`running`/`failed`), `final` (bool: the running/latest summary is the final one made after CC was turned off; on `failed` = the final summary failed), `data` (`{current_topic, points[], decisions[], todos[{task,owner,due}], open_questions[], new_since_last[]}` or null), `previous` (the summary before, for highlighting), `at` (ms), `used`, `error`, `interval`, `summarizer`, `session` `{id, started_at, finals, recorded, summarized, final_pending, closed}` (`closed`: no session is open; this is the newest finalized session, shown so its final summary stays visible), `minutes` (caption-minutes job view or null), `notice?` | render the meeting-points section; badge on CC when a new summary arrives while the section is hidden. Sent to EVERY authenticated viewer (CC on or off), once at connect and on every change |
 | `captions_state` | `state` (`off`/`connecting`/`live`/`offline`/`unavailable`), `detail` (HDMI stream), `on`, `since` (epoch s), `mic` `{available, on, name, state, detail}` | CC button styling, offline notice over the video, 「我的麦克风」 |
+| `uplink_state` | `available`, `device`, `on` (this viewer sends), `busy` (another viewer sends), `error?` (`busy`/`unavailable`/device error, only to the requester) | Mic button state; sent to every viewer on ownership change, also as `hello.uplink` |
 | `minutes_action` | `id`, `message` or `error` | hint + refresh recordings list |
 | `recordings_list` | `items[]` (each `minutes`: null or `{state, label, summarizer, used, error, links{minutes, minutes_md, transcript, live_vtt}}`), `minutes_enabled`, `local`, `sop_enabled`, `sop_prompt` | render list / result card |
 
