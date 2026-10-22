@@ -542,6 +542,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recording-mic", type=str, metavar="NAME",
                         help="Host microphone for server-side recording: part of its"
                              " device name (default: EarPods; empty = none)")
+    parser.add_argument("--uplink-output", type=str, metavar="NAME",
+                        help="Play the web viewer's microphone (Mic button) on this host"
+                             " output device: part of its name, WASAPI preferred"
+                             " (default: empty = off)")
     parser.add_argument("--recording-max-seconds", type=int, metavar="SEC",
                         help="Stop a server-side recording automatically after SEC"
                              " seconds (default: 10800 = 3 h)")

@@ -50,7 +50,9 @@ class RecordingAudioMixer {
   }
   async open(config) {
     try {
-      this.ctx = new AudioContext({sampleRate:48000});
+      // config.context: a context the caller created inside a user gesture
+      // (iOS only starts audio from one); it is owned and closed here.
+      this.ctx = config.context || new AudioContext({sampleRate:48000});
       await this.ctx.resume();
       if (this.ctx.state !== "running") throw new Error("Audio engine is suspended; click again to allow audio");
       this.destination = this.ctx.createMediaStreamDestination();

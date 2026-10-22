@@ -152,3 +152,19 @@ Run the `py_compile` + `node --check` block from SKILL.md. Restart server, reloa
   browser not recording; 本次忽略 is per CC session (sessionStorage).
 - Tests: `tests/test_live_meeting.py`, `tests/test_web_display.py`
   (zoom/Fit/panel widths keep the 0-4095 mapping).
+
+### Microphone uplink (`Mic` button)
+- Client: `micStart` → `getUserMedia` (echoCancellation/noiseSuppression/AGC,
+  mono) → AudioWorklet `mic-up` (20 ms int16 frames) → binary `0x12`; frames
+  are dropped while `ws.bufferedAmount` > 64 KB. Needs a secure context
+  (https or localhost): over plain http the button is greyed (`mic-unusable`)
+  and a click only shows the https hint. Stops on WS close; `micGen` cancels
+  an in-flight start.
+- Server: `_uplink.py` `UplinkPlayer` (sounddevice OutputStream at the device
+  rate, `_captions.Resampler` for other browser rates, `JitterBuffer` 40 ms
+  prebuffer / 150 ms cap) and `find_output_device` (substring, WASAPI first).
+  `_uplink_start/_uplink_stop` keep one owner (`_uplink_owner`); the device is
+  opened only while someone sends.
+- Config: `uplink_output` (empty = off). CLI `--uplink-output`, launcher
+  `-UplinkOutput` (TargetPC1 default: `ヘッドホン (High Definition Audio Device)`).
+- Tests: `tests/test_uplink.py`.

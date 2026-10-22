@@ -38,6 +38,13 @@ function recordingDefaultDevice(name) {
     (name === "mic" ? /EarPods/i.test(d.label || "") : !!recHdmiDefaults[recAudioTarget] && recordingDeviceTarget(d) === recAudioTarget));
   return matches.length === 1 ? matches[0] : null;
 }
+// Auto: this Target's capture card when the browser runs on the Host;
+// otherwise (phone, iPad, other PC) the server's HDMI capture over the socket.
+function recordingAutoDevice(name) {
+  const device = recordingDefaultDevice(name);
+  if (device) return device.deviceId;
+  return name === "hdmi" && audioCfg ? "server" : null;
+}
 function setRecordingAudioTarget(name) {
   recAudioTarget = String(name || "").toLowerCase().replace(/[\s_-]/g, "").replace("targetpc", "target");
   updateRecordingDevices();
@@ -59,8 +66,10 @@ function updateRecordingDevices(preferredMic, preferredHdmi) {
     select.replaceChildren();
     const add = (value, label) => select.add(new Option(label, value));
     const device = recordingDefaultDevice(name);
+    const auto = recordingAutoDevice(name);
     const defaultName = name === "mic" ? "EarPods" : recHdmiDefaults[recAudioTarget]?.label || "this Target's HDMI";
-    add("auto", "Default — " + defaultName + (device ? " · " + device.deviceId.slice(-6).toUpperCase() : " (not available)"));
+    add("auto", "Default — " + defaultName + (device ? " · " + device.deviceId.slice(-6).toUpperCase()
+      : auto === "server" ? " (server capture)" : " (not available)"));
     if (name === "mic") add("default", "Windows default microphone");
     else add("", "Select an HDMI input manually…");
     if (name === "hdmi" && audioCfg) add("server", "Target HDMI (server capture)");
@@ -99,26 +108,55 @@ function recordingBackendAudioConnection(connected) {
 function selectedRecordingDevice(name) {
   const id = (name === "mic" ? recDeviceSelect : recHdmiSelect).value;
   if (id !== "auto") return id;
-  const device = recordingDefaultDevice(name);
+  const device = recordingAutoDevice(name);
   if (!device) throw new Error(name === "mic"
     ? "Default EarPods microphone not available. Connect EarPods and click Inputs, or choose a microphone manually."
     : "Default " + (recHdmiDefaults[recAudioTarget]?.label || "Target HDMI") + " not available. Click Inputs or choose its HDMI device manually.");
-  return device.deviceId;
+  return device;
+}
+// Keeps the server PCM feed subscribed (remote viewers) while anyone uses it.
+function acquireServerAudioFeed() {
+  recServerAudioRefs++;
+  if (!IS_LAN) wsSend({type:"audio", on:true});
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--recServerAudioRefs === 0 && !IS_LAN) wsSend({type:"audio", on:false});
+  };
 }
 function recordingInputLease(deviceId) {
   if (deviceId !== "server") return {deviceId, open:id => recAudioInputs.acquire(id || deviceId)};
   return {deviceId, open:async () => {
     if (!audioCfg) throw new Error("Target HDMI audio is not available");
     await ensureAudioForRecording();
-    recServerAudioRefs++;
-    if (!IS_LAN) wsSend({type:"audio", on:true});
-    let released = false;
-    return {stream:recDest.stream, close(){
-      if (released) return;
-      released = true;
-      if (--recServerAudioRefs === 0 && !IS_LAN) wsSend({type:"audio", on:false});
-    }};
+    return {stream:recDest.stream, close:acquireServerAudioFeed()};
   }};
+}
+// Listening to the server's HDMI audio plays inside audioCtx (worklet →
+// serverMonitorGain → speakers), never through a MediaStream into a second
+// context: on iOS that bridge is silent unless a microphone capture is open,
+// and crackles when one is. Same interface as the mixer for the callers.
+async function openServerHdmiMonitor() {
+  if (!audioCfg) throw new Error("Target HDMI audio is not available");
+  await startAudio();
+  if (audioCtx.state !== "running") {
+    // Without a user gesture iOS may leave resume() pending forever.
+    await Promise.race([audioCtx.resume().catch(() => {}), new Promise(r => setTimeout(r, 1500))]);
+    if (audioCtx.state !== "running") throw new Error("Audio engine is suspended; click again to allow audio");
+  }
+  const release = acquireServerAudioFeed();
+  let closed = false;
+  const ramp = value => serverMonitorGain?.gain.setTargetAtTime(value, audioCtx.currentTime, 0.02);
+  return {
+    setMonitoring(on, volume) { if (!closed) ramp(on ? Math.max(0, Math.min(1, Number(volume) || 0)) : 0); },
+    setInputAvailable(name, available) {
+      if (closed || hdmiMonitor?.mixer !== this) return;
+      hdmiMonitorState = available ? "live" : "interrupted";
+      updateHdmiMonitorControls();
+    },
+    close() { if (closed) return; closed = true; ramp(0); release(); }
+  };
 }
 function updateHdmiMonitorControls(detail = "") {
   const btn = recEl("btnHdmiMonitor");
@@ -134,35 +172,76 @@ function updateHdmiMonitorControls(detail = "") {
 }
 function stopHdmiMonitoring() {
   hdmiMonitorWanted = false;
+  syncAudioSession();
   ++hdmiMonitorEpoch;
   hdmiMonitor?.mixer.close();
   hdmiMonitor = null;
   hdmiMonitorState = "off";
   updateHdmiMonitorControls();
 }
-async function startHdmiMonitoring({auto = false} = {}) {
+// iOS (Safari 16.4+): "playback" keeps Web Audio on the speaker and ignores
+// the silent switch; the Mic button's capture needs "play-and-record".
+function setAudioSessionType(type) {
+  try {
+    if (navigator.audioSession && navigator.audioSession.type !== type) navigator.audioSession.type = type;
+  } catch (e) {}
+}
+function syncAudioSession() {
+  const mic = typeof micWanted !== "undefined" && micWanted;
+  setAudioSessionType(mic ? "play-and-record" : hdmiMonitorWanted ? "playback" : "auto");
+}
+// iOS starts an AudioContext only from inside a user gesture, so a click
+// creates and resumes the listener's contexts before the first await.
+function gestureAudioContext() {
+  unlockServerAudio();
+  // Server audio plays in audioCtx (unlocked above); only a local capture
+  // card needs the mixer's own context.
+  const id = recHdmiSelect.value;
+  if (id === "server" || (id === "auto" && recordingAutoDevice("hdmi") === "server")) return null;
+  try {
+    const ctx = new AudioContext({sampleRate:48000});
+    ctx.resume().catch(() => {});
+    return ctx;
+  } catch (e) { return null; }
+}
+async function startHdmiMonitoring({auto = false, context = null} = {}) {
   const epoch = ++hdmiMonitorEpoch;
   hdmiMonitorWanted = true;
+  syncAudioSession();
   hdmiMonitorState = "opening";
   updateHdmiMonitorControls();
   let mixer;
   try {
     await refreshRecordingInputs();
-    if (epoch !== hdmiMonitorEpoch) return;
+    if (epoch !== hdmiMonitorEpoch) { context?.close().catch(() => {}); return; }
     const id = selectedRecordingDevice("hdmi");
     if (!id || id === "default") throw new Error("Select this Target's HDMI input in Recording audio");
+    if (id === "server") {
+      context?.close().catch(() => {});
+      context = null;
+      const monitor = await openServerHdmiMonitor();
+      if (epoch !== hdmiMonitorEpoch) { monitor.close(); return; }
+      hdmiMonitor = {mixer:monitor, serverHdmi:true};
+      monitor.setMonitoring(true, Number(recEl("recMonitorGain").value)/100);
+      hdmiMonitorState = "live";
+      updateHdmiMonitorControls();
+      return;
+    }
     mixer = new RecordingAudioMixer({onState(name, state, detail){
       if (epoch !== hdmiMonitorEpoch) return;
       hdmiMonitorState = state;
       updateHdmiMonitorControls(detail);
     }});
     // Open muted. A canceled pending request must never play even briefly.
-    await mixer.open({inputs:{hdmi:{...recordingInputLease(id), gain:0}}, monitor:false});
+    const opening = mixer.open({inputs:{hdmi:{...recordingInputLease(id), gain:0}}, monitor:false, context});
+    context = null;  // the mixer owns it now
+    await opening;
     if (epoch !== hdmiMonitorEpoch) { mixer.close(); return; }
     hdmiMonitor = {mixer, serverHdmi:id === "server"};
     mixer.setMonitoring(true, Number(recEl("recMonitorGain").value)/100);
   } catch (error) {
     mixer?.close();
+    context?.close().catch(() => {});
     if (epoch !== hdmiMonitorEpoch) return;
     if (auto && /suspended/i.test(error.message)) {
       // Browsers keep audio suspended until a user gesture: stay ON and
@@ -171,7 +250,7 @@ async function startHdmiMonitoring({auto = false} = {}) {
       const retry = () => {
         window.removeEventListener("pointerdown", retry, true);
         window.removeEventListener("keydown", retry, true);
-        if (hdmiMonitorWanted && epoch === hdmiMonitorEpoch) startHdmiMonitoring();
+        if (hdmiMonitorWanted && epoch === hdmiMonitorEpoch) startHdmiMonitoring({context:gestureAudioContext()});
       };
       window.addEventListener("pointerdown", retry, true);
       window.addEventListener("keydown", retry, true);
@@ -179,6 +258,7 @@ async function startHdmiMonitoring({auto = false} = {}) {
     }
     hdmiMonitorWanted = false;
     hdmiMonitorState = "error";
+    syncAudioSession();
     updateHdmiMonitorControls(error.message);
     if (!auto) showHint("HDMI listening failed: " + error.message);
   }
@@ -187,7 +267,7 @@ function autoStartHdmiMonitoring() {
   if (!hdmiMonitorWanted) startHdmiMonitoring({auto:true});
 }
 recEl("btnHdmiMonitor").addEventListener("click", () => {
-  if (hdmiMonitorWanted) stopHdmiMonitoring(); else startHdmiMonitoring();
+  if (hdmiMonitorWanted) stopHdmiMonitoring(); else startHdmiMonitoring({context:gestureAudioContext()});
 });
 recEl("btnMonitorVolume").addEventListener("click", () => {
   const panel = recEl("hdmiVolumePanel");
