@@ -28,7 +28,7 @@ SOP_STYLE = r'''
 #recordAudioAdvanced{margin-top:9px}
 #sopLibraryLink{display:block;border-top:1px solid #384b66;padding:13px 0 0;margin-top:12px;color:#dce8f8;text-decoration:none;font:13px system-ui,sans-serif}
 #recordingResult{top:auto;bottom:16px}
-#sopGenerateDialog{width:410px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 30px);overflow:auto;padding:22px;background:#18263b;color:#e0e9f7;border:1px solid #45617d;border-radius:10px;font:13px system-ui,sans-serif}
+#sopGenerateDialog{margin:auto;width:410px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 30px);overflow:auto;padding:22px;background:#18263b;color:#e0e9f7;border:1px solid #45617d;border-radius:10px;font:13px system-ui,sans-serif}
 #sopGenerateDialog::backdrop{background:#0004}
 #sopGenerateDialog label{display:grid;gap:7px;margin-top:16px;color:#b7c6dc;font-size:12px}
 #sopGenerateDialog input,#sopGenerateDialog select{min-width:0;width:100%;padding:8px 10px;border:1px solid #45617d;background:#162238;color:#e0e9f7;border-radius:5px;font:14px system-ui,sans-serif}
@@ -117,16 +117,13 @@ document.getElementById('sopDialogStart').onclick=async()=>{
 
 def install_sop_viewer(html):
     html=html.replace('</head>',SOP_STYLE+'</head>')
-    html=html.replace('<section class="rec-channel" id="recMicChannel"','<details id="recordAudioAdvanced"><summary>设备与音量</summary><section class="rec-channel" id="recMicChannel"',1)
-    html=html.replace('<p id="recAudioStatus" role="status"></p>','<p id="recAudioStatus" role="status"></p></details><a id="sopLibraryLink" href="/library" target="_blank" rel="noopener" hidden>录像与 SOP ↗</a>',1)
-    html=html.replace('<h3>Recent recordings <button','<h3 id="legacyRecordingHeading" hidden>Recent recordings <button',1)
+    # Everything in this disclosure is browser-recording only, so it hides with them in server mode.
+    html=html.replace('<section class="rec-channel browser-only" id="recMicChannel"','<details id="recordAudioAdvanced" class="browser-only"><summary>设备与音量</summary><section class="rec-channel browser-only" id="recMicChannel"',1)
+    html=html.replace('<p id="recAudioStatus" class="browser-only" role="status"></p>','<p id="recAudioStatus" class="browser-only" role="status"></p></details>',1)
+    html=html.replace('<h3>Recent recordings <button','<a id="sopLibraryLink" href="/library" target="_blank" rel="noopener" hidden>录像与 SOP ↗</a><h3 id="legacyRecordingHeading" hidden>Recent recordings <button',1)
     html=html.replace('<div id="recentRecordings"','<div hidden id="recentRecordings"',1)
     html=html.replace('<div id="recordingResultActions" class="file-actions"></div>','<div id="recordingResultActions" class="file-actions"></div>'+SOP_CARD_HTML,1)
     html=html.replace('<div id="hint"></div>',SOP_DIALOG_HTML+'<div id="hint"></div>',1)
-    # Nested audio disclosure must not close the outer toolbar menu.
-    html=html.replace('toolbar.querySelectorAll("details")','toolbar.querySelectorAll(".tool-group")')
-    html=html.replace('toolbar.querySelectorAll("details[open]")','toolbar.querySelectorAll(".tool-group[open]")')
-    html=html.replace('body:has(#toolbar details[open])','body:has(#toolbar .tool-group[open])')
     html=html.replace('Recording settings and recent files','Recording settings')
     html=html.replace('</script>',SOP_VIEWER_JS+'\n</script>',1)
     return html
