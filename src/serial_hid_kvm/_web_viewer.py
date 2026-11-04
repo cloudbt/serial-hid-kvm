@@ -319,7 +319,7 @@ body.tb-hidden #container{height:100%}
 #toolbar button.active{background:#235277;border-color:#5598ce}
 #btnRec.recording{background:#8b2632!important;border-color:#d65c69!important;animation:none}
 #recordingResult{position:fixed;z-index:21;top:50px;right:12px;width:min(380px,calc(100vw - 24px));padding:16px;background:#18263b;border:1px solid #45617d;border-radius:10px;box-shadow:0 10px 30px #0008;font-size:13px}
-body:has(#toolbar details[open]) #recordingResult{display:none}
+body:has(#toolbar .tool-group[open]) #recordingResult{display:none}
 #recordingResult strong{display:block;padding-right:20px;color:#a6dfb8}
 #recordingResultName{margin:10px 0 6px;overflow-wrap:anywhere}
 #recordingResult p{font-size:12px;line-height:1.5;color:#b7c6dc;margin-bottom:12px}
@@ -410,6 +410,12 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
 .minutes-line a,.minutes-line button{font:12px system-ui,sans-serif;color:#e0e9f7;background:#28466a;border:1px solid #45617d;border-radius:5px;padding:3px 7px;text-decoration:none;cursor:pointer}
 .minutes-line .minutes-failed{color:#ffb48c;overflow-wrap:anywhere}
 #recentMinutes .recent-file strong{font-weight:500}
+.panel-fold{margin-top:18px;border-top:1px solid #384b66;padding-top:12px}
+.panel-fold>summary{font-size:12px;font-weight:600;color:#b7c6dc;cursor:pointer}
+.panel-fold>summary:hover{color:#e0e9f7}
+.panel-fold>summary:focus-visible{outline:2px solid #8fb9ff;outline-offset:2px}
+.panel-fold>div{margin-top:10px}
+.panel-count{font-weight:400;opacity:.75}
 @media(max-width:600px){#toolbar #btnCC{padding:3px 6px}#toolbar #btnCC .cc-word{display:none}#ccOverlay{bottom:12px}#sidePanel{top:auto;height:60vh;width:100%;border-left:0;border-top:1px solid #384b66;z-index:22}#sideResize{display:none}}
 </style>
 </head>
@@ -505,10 +511,10 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
         </select></label>
         <h3>Recent recordings <button id="refreshRecordings" title="Refresh recent recordings">↻</button></h3>
         <div id="recentRecordings" aria-live="polite">Connect to view recordings.</div>
-        <h3 id="minutesHeading" hidden>会议记录</h3>
-        <div id="recentMinutes" hidden></div>
-        <h3 id="notesHeading" hidden>会议记录（字幕生成·无录像）</h3>
-        <div id="meetingNotes" hidden></div>
+        <details id="minutesSection" class="panel-fold" hidden><summary>会议记录 <span id="minutesCount" class="panel-count"></span></summary>
+        <div id="recentMinutes"></div></details>
+        <details id="notesSection" class="panel-fold" hidden><summary>会议记录（字幕生成·无录像） <span id="notesCount" class="panel-count"></span></summary>
+        <div id="meetingNotes"></div></details>
         <p id="recordingActionStatus" role="status"></p>
       </div>
     </details>
@@ -1197,7 +1203,7 @@ let _tbTimer = null;
 function _tbShow() { toolbar.classList.add("visible"); clearTimeout(_tbTimer); }
 function _tbScheduleHide() {
   clearTimeout(_tbTimer);
-  _tbTimer = setTimeout(() => (toolbar.querySelector("details[open]") ? _tbScheduleHide() : toolbar.classList.remove("visible")), 1500);
+  _tbTimer = setTimeout(() => (toolbar.querySelector(".tool-group[open]") ? _tbScheduleHide() : toolbar.classList.remove("visible")), 1500);
 }
 document.addEventListener("mousemove", (e) => {
   if (!document.body.classList.contains("fs-autohide")) return;
@@ -1624,19 +1630,19 @@ let localRecordingActions = false;
 let recordingLibraryTimer = null;
 function refreshRecordingLibrary() { wsSend({type:"recordings_list"}); }
 function closeToolbarPanels() {
-  toolbar.querySelectorAll("details[open]").forEach(d => d.open = false);
+  toolbar.querySelectorAll(".tool-group[open]").forEach(d => d.open = false);
 }
-toolbar.querySelectorAll("details").forEach(detail => {
+toolbar.querySelectorAll(".tool-group").forEach(detail => {
   detail.addEventListener("toggle", () => {
     if (!detail.open) return;
-    toolbar.querySelectorAll("details[open]").forEach(other => { if (other !== detail) other.open = false; });
+    toolbar.querySelectorAll(".tool-group[open]").forEach(other => { if (other !== detail) other.open = false; });
     if (detail.id === "recordMenu") refreshRecordingLibrary();
     if (document.fullscreenElement) _tbShow();
   });
 });
 document.addEventListener("pointerdown", e => { if (!toolbar.contains(e.target)) closeToolbarPanels(); });
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape" && toolbar.querySelector("details[open]")) {
+  if (e.key === "Escape" && toolbar.querySelector(".tool-group[open]")) {
     e.preventDefault(); e.stopPropagation(); closeToolbarPanels(); container.focus();
   }
 }, true);
@@ -1763,13 +1769,13 @@ function minutesLine(item) {
 function renderMinutesList(msg) {
   // With the SOP library enabled the plain recordings list is hidden, so
   // minutes get their own list; otherwise they appear inline per recording.
-  const heading = document.getElementById("minutesHeading");
   const list = document.getElementById("recentMinutes");
   const show = minutesEnabled && !!msg.sop_enabled;
-  heading.hidden = list.hidden = !show;
+  document.getElementById("minutesSection").hidden = !show;
   list.replaceChildren();
   if (!show) return;
   const items = msg.items.filter(item => item.minutes);
+  document.getElementById("minutesCount").textContent = items.length;
   if (!items.length) { list.textContent = "暂无会议记录。"; return; }
   for (const item of items) {
     const row = document.createElement("div"); row.className = "recent-file";
@@ -1781,9 +1787,9 @@ function renderMinutesList(msg) {
 function renderMeetingNotes(msg) {
   // Minutes generated from live captions only (no recording); remote voice only.
   const notes = msg.meeting_notes || [];
-  const heading = document.getElementById("notesHeading");
   const list = document.getElementById("meetingNotes");
-  heading.hidden = list.hidden = !(minutesEnabled && notes.length);
+  document.getElementById("notesSection").hidden = !(minutesEnabled && notes.length);
+  document.getElementById("notesCount").textContent = notes.length;
   list.replaceChildren();
   for (const note of notes) {
     const row = document.createElement("div"); row.className = "recent-file";
@@ -2680,7 +2686,7 @@ function toggleToolbar() {
   toolbarHidden = !toolbarHidden;
   document.body.classList.toggle("tb-hidden", toolbarHidden);
   if (toolbarHidden) {
-    toolbar.querySelectorAll("details[open]").forEach(d => d.open = false);
+    toolbar.querySelectorAll(".tool-group[open]").forEach(d => d.open = false);
     toolbar.classList.remove("visible");
     showHint("Ctrl+Alt+Enter: toolbar");
   } else {

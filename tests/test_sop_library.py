@@ -355,3 +355,31 @@ def test_local_transport_no_origin_or_dns_rebinding_and_no_target_access(tmp_pat
             assert blocked.value.code==403
         finally:await server.stop()
     asyncio.run(run())
+
+
+def test_viewer_markup_has_every_element_the_sop_script_needs():
+    # The installer patches the viewer by string; a silent miss makes the SOP
+    # script throw while rendering and takes the "saved" card down with it.
+    import re
+    from serial_hid_kvm._sop_viewer import SOP_VIEWER_JS
+    from serial_hid_kvm._web_viewer import _VIEWER_HTML
+    needed=set(re.findall(r"getElementById\('(\w+)'\)",SOP_VIEWER_JS))|{'sopLater','sopKeep','sopDialogClose','sopDialogCancel'}
+    assert 'sopLibraryLink' in needed
+    for element in needed:
+        assert _VIEWER_HTML.count(f'id="{element}"')==1,element
+    panel=_VIEWER_HTML.split('class="tool-panel record-panel"',1)[1].split('id="recordingActionStatus"',1)[0]
+    assert '<a id="sopLibraryLink" href="/library"' in panel
+    audio=panel.split('<details id="recordAudioAdvanced" class="browser-only">',1)[1].split('</details>',1)[0]
+    assert 'id="recMicChannel"' in audio and 'id="recAudioStatus"' in audio
+
+
+def test_minutes_lists_start_collapsed_and_never_count_as_an_open_menu():
+    from serial_hid_kvm._web_viewer import _VIEWER_HTML
+    for section,inner in (('minutesSection','recentMinutes'),('notesSection','meetingNotes')):
+        opening=f'<details id="{section}" class="panel-fold" hidden>'
+        assert opening in _VIEWER_HTML
+        assert f'id="{inner}"' in _VIEWER_HTML.split(opening,1)[1].split('</details>',1)[0]
+    # A fold left open inside a closed panel must not swallow Esc or pin the toolbar.
+    script=_VIEWER_HTML.split('<script>',1)[1]
+    assert 'toolbar.querySelector("details' not in script
+    assert 'toolbar.querySelectorAll("details' not in script
