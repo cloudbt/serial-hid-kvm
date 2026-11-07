@@ -103,6 +103,14 @@ class Config:
         # summaries (0 = off; 3/5/10).  Set from the viewer; every new
         # meeting starts with it off again.
         self.captions_summary_interval: int = 0
+        # Automatic meeting capture: Target HDMI sound -> audio recording +
+        # captions, daily caption .md files.  meetings_dir "" = 'meetings'
+        # beside the recordings folder; capture_mode is the initial mode
+        # (auto | manual | off) until a viewer changes it.
+        self.meetings_dir: str = ""
+        self.capture_enabled: bool = True
+        self.capture_mode: str = "auto"
+        self.capture_threshold_db: int = -55
         # Meeting minutes after a recording session finishes.  Summarizer:
         # agy | codex | mac-qwen | off; on failure the next entries of
         # minutes_fallback_order are tried (mac-qwen never falls back to a
@@ -146,6 +154,7 @@ _FILE_KEYS = {
     "sop_project_dir", "sop_agy_executable", "sop_segment_seconds", "sop_agy_timeout",
     "ai_hub_url", "ai_hub_key", "captions_enabled", "captions_language", "captions_summary_interval",
     "captions_mic", "captions_meeting_gap",
+    "meetings_dir", "capture_enabled", "capture_mode", "capture_threshold_db",
     "minutes_enabled", "minutes_summarizer", "minutes_fallback_order", "minutes_timeout",
     "mac_llm_url", "mac_llm_key", "mac_llm_model", "codex_executable",
     "audio_device",
@@ -245,6 +254,10 @@ _ENV_MAP = {
     "SHKVM_CAPTIONS_SUMMARY_INTERVAL": "captions_summary_interval",
     "SHKVM_CAPTIONS_MIC": "captions_mic",
     "SHKVM_CAPTIONS_MEETING_GAP": "captions_meeting_gap",
+    "SHKVM_MEETINGS_DIR": "meetings_dir",
+    "SHKVM_CAPTURE": "capture_enabled",
+    "SHKVM_CAPTURE_MODE": "capture_mode",
+    "SHKVM_CAPTURE_THRESHOLD_DB": "capture_threshold_db",
     "SHKVM_MINUTES": "minutes_enabled",
     "SHKVM_MINUTES_SUMMARIZER": "minutes_summarizer",
     "SHKVM_MINUTES_FALLBACK_ORDER": "minutes_fallback_order",
@@ -325,6 +338,9 @@ def _apply_args(config: Config, args):
         "captions_summary_interval": "captions_summary_interval",
         "captions_mic": "captions_mic",
         "captions_meeting_gap": "captions_meeting_gap",
+        "meetings_dir": "meetings_dir",
+        "capture_mode": "capture_mode",
+        "capture_threshold_db": "capture_threshold_db",
         "minutes_summarizer": "minutes_summarizer",
         "minutes_fallback_order": "minutes_fallback_order",
         "minutes_timeout": "minutes_timeout",
@@ -360,6 +376,8 @@ def _apply_args(config: Config, args):
         config.direct_enabled = False
     if getattr(args, "no_captions", False):
         config.captions_enabled = False
+    if getattr(args, "no_capture", False):
+        config.capture_enabled = False
     if getattr(args, "no_minutes", False):
         config.minutes_enabled = False
 

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from serial_hid_kvm import config as config_module
+from serial_hid_kvm import _auto_capture
 from serial_hid_kvm import _minutes
 from serial_hid_kvm import _web_viewer
 
@@ -30,6 +31,9 @@ def _isolated_environment(tmp_path_factory):
         original_init(self)
         self.ai_hub_url = DEAD_URL
         self.mac_llm_url = DEAD_URL + "/v1"
+        # Meeting capture subscribes to the HDMI audio permanently; tests that
+        # count audio subscribers predate it. Its own tests switch it on.
+        self.capture_enabled = False
 
     patch.setattr(config_module.Config, "__init__", init)
     patch.setattr(_minutes.MinutesService, "start", lambda self: None)
@@ -40,5 +44,9 @@ def _isolated_environment(tmp_path_factory):
         raise OSError("no microphone in tests")
 
     patch.setattr(_web_viewer, "_open_mic", no_microphone)
+    # Meeting capture: presence/focus files go to a temp LOCALAPPDATA, and a
+    # capture session never finds (or opens) the real EarPods.
+    patch.setenv("LOCALAPPDATA", str(home / "localappdata"))
+    patch.setattr(_auto_capture, "find_input_device", lambda name: None)
     yield home
     patch.undo()

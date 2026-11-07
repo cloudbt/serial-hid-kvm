@@ -572,6 +572,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--captions-meeting-gap", type=int, metavar="MIN",
                         help="A caption after MIN minutes without any starts a new meeting"
                              " (default: 30; 0 = never)")
+    parser.add_argument("--meetings-dir", type=str, metavar="DIR",
+                        help="Meeting audio and daily caption .md files (default: 'meetings'"
+                             " beside the recordings folder)")
+    parser.add_argument("--no-capture", action="store_true",
+                        help="Disable meeting capture (automatic audio recording + daily caption files)")
+    parser.add_argument("--capture-mode", type=str, choices=("auto", "manual", "off"),
+                        help="Initial meeting capture mode until changed in the viewer"
+                             " (default: auto = record audio + captions when the Target plays sound)")
+    parser.add_argument("--capture-threshold-db", type=int, metavar="DB",
+                        help="HDMI level that counts as sound for automatic capture"
+                             " (default: -55 dBFS)")
     parser.add_argument("--no-captions", action="store_true",
                         help="Disable live captions in the web viewer")
     parser.add_argument("--no-minutes", action="store_true",

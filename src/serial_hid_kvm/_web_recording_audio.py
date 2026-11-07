@@ -204,6 +204,13 @@ function gestureAudioContext() {
     return ctx;
   } catch (e) { return null; }
 }
+// Resolves once the server's audio_config arrived (or after ms).
+const audioCfgWaiters = [];
+function whenAudioConfig(ms) {
+  if (audioCfg) return Promise.resolve();
+  return new Promise(resolve => { audioCfgWaiters.push(resolve); setTimeout(resolve, ms); });
+}
+function audioConfigArrived() { audioCfgWaiters.splice(0).forEach(resolve => resolve()); }
 async function startHdmiMonitoring({auto = false, context = null} = {}) {
   const epoch = ++hdmiMonitorEpoch;
   hdmiMonitorWanted = true;
@@ -212,7 +219,14 @@ async function startHdmiMonitoring({auto = false, context = null} = {}) {
   updateHdmiMonitorControls();
   let mixer;
   try {
-    await refreshRecordingInputs();
+    // Plain http (a phone on the LAN IP) has no mediaDevices: there is no
+    // local capture card to list, so listening falls back to the server's
+    // HDMI audio over the socket (recordingAutoDevice -> "server").
+    try { await refreshRecordingInputs(); }
+    catch (e) { if (navigator.mediaDevices) throw e; }
+    // Without a local capture card the server's audio is used, but listening
+    // starts at hello and audio_config (audioCfg) comes right after it.
+    if (!recordingDefaultDevice("hdmi")) await whenAudioConfig(5000);
     if (epoch !== hdmiMonitorEpoch) { context?.close().catch(() => {}); return; }
     const id = selectedRecordingDevice("hdmi");
     if (!id || id === "default") throw new Error("Select this Target's HDMI input in Recording audio");

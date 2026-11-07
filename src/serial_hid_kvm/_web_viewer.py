@@ -24,7 +24,7 @@ import shutil
 import socket
 import ssl
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, quote
 
@@ -33,8 +33,10 @@ from websockets.http11 import Response
 
 from ._audio import AudioCapture
 from ._captions import CaptionService
-from ._minutes import MinutesService
-from ._live_meeting import LiveMeeting
+from ._minutes import HubClient, MinutesService
+from ._live_meeting import JST as _JST, LiveMeeting
+from ._auto_capture import AutoCapture, Backfill, Presence, meetings_root
+from ._daily_captions import DailyCaptions
 from ._web_audio import RECORDING_AUDIO_MIXER_JS
 from ._web_recording_audio import RECORDING_AUDIO_CONTROLS_JS
 from ._recording import convert_recording
@@ -333,6 +335,17 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
 @media(max-width:850px){#targetName{display:none}.status-group>summary{max-width:160px}.record-panel{position:fixed;left:auto;right:8px;top:46px}}
 @media(max-width:600px){#toolbar{padding:6px;gap:3px}.status-group{display:none}.tool-divider{margin:0 1px}.tool-group>summary[data-compact]{font-size:0;padding:3px 7px}.tool-group>summary[data-compact]::after{content:attr(data-compact);font-size:16px}#toolbar #btnFs{font-size:0;padding:3px 8px}#btnFs::after{content:"⛶";font-size:17px}#toolbar #btnAudio{font-size:0;padding:3px 7px}#btnAudio::after{content:"♫";font-size:16px}.tool-panel,.record-panel{position:fixed;top:46px;left:8px;right:8px;width:auto;max-width:400px}}
 @media(max-width:600px){body{display:flex;flex-direction:column}#toolbar{flex-wrap:wrap;height:auto;min-height:40px}#container{flex:1;min-height:0}.hdmi-monitor-name{display:none}.hdmi-monitor-controls,.hdmi-monitor-volume{gap:3px}#hdmiVolumePanel{position:fixed;top:82px;left:8px;right:auto}#recordingResult{top:auto;bottom:12px}}
+.meet-controls{display:flex;align-items:center;gap:1px;flex-shrink:0}
+.meet-controls>button{border-radius:5px 0 0 5px!important}
+#meetMenu>summary{background:#0f3460;border:1px solid #1a1a5e;border-radius:0 5px 5px 0;padding:3px 7px}
+#toolbar #btnMeet{display:inline-flex;align-items:center;gap:5px;font-variant-numeric:tabular-nums;background:transparent;border:1px solid #4a5a72;color:#8796ad}
+#toolbar #btnMeet .meet-dot{width:8px;height:8px;border-radius:50%;border:1.5px solid currentColor;box-sizing:border-box}
+#toolbar #btnMeet.meet-auto{border-color:#5dcaa5;color:#9fe1c8}
+#toolbar #btnMeet.meet-on{background:#8b2632!important;border-color:#d65c69!important;color:#fff}
+#toolbar #btnMeet.meet-on .meet-dot{background:#fff;border-color:#fff;animation:ccPulse 1.6s infinite}
+#toolbar #btnMeet:disabled{border-style:dashed;color:#5f6b7d;opacity:1}
+.meet-word{font-size:12px}
+.meet-panel{width:min(340px,calc(100vw - 24px))}
 .cc-controls{display:flex;align-items:center;gap:1px;flex-shrink:0}
 .cc-controls>button{border-radius:5px 0 0 5px!important;min-width:38px}
 #ccMenu>summary{background:#0f3460;border:1px solid #1a1a5e;border-radius:0 5px 5px 0;padding:3px 7px}
@@ -357,7 +370,20 @@ body.fs-autohide #toolbar{max-width:100vw;overflow:visible}
 .cc-who{display:inline-block;font-size:.6em;line-height:1.5;padding:0 .45em;border-radius:3px;margin-right:.45em;vertical-align:.15em;background:#45617d;color:#e0e9f7}
 .cc-me .cc-who{background:#1d9e75;color:#fff}
 #ccLines .cc-me{color:#c9f2e2}
-#ccHistoryList .cc-who{font-size:11px;vertical-align:1px}
+#ccHistoryList .cc-who,#ccDayList .cc-who{font-size:11px;vertical-align:1px}
+.cc-tabs{display:inline-flex;gap:0}
+#sidePanel .cc-tabs button{border-radius:0;background:transparent;color:#aebcd0}
+#sidePanel .cc-tabs button:first-child{border-radius:5px 0 0 5px}
+#sidePanel .cc-tabs button:last-child{border-radius:0 5px 5px 0;border-left:0}
+#sidePanel .cc-tabs button[aria-selected=true]{background:#28466a;color:#fff}
+#ccDayList{padding:8px 12px;user-select:text;cursor:text;line-height:1.55}
+#ccDayList[hidden],#ccHistoryList[hidden]{display:none}
+#ccDayList p{margin:0 0 6px}
+#ccDayList time{color:#8fa6c4;font-variant-numeric:tabular-nums;margin-right:8px;font-size:12px}
+#ccDayList h4{margin:14px 0 6px;padding-top:8px;border-top:1px solid #384b66;font-size:13px;color:#b7c6dc}
+#ccDayList h4:first-of-type{border-top:0;padding-top:0}
+#ccDayList .cc-day-note{font-size:11px;color:#8fa6c4;overflow-wrap:anywhere}
+#ccDayList .cc-batch{font-size:10px;color:#ffd3a0;margin-right:5px}
 .cc-mic{display:flex!important;align-items:center;justify-content:flex-start!important;gap:6px;margin:6px 0 2px}
 .cc-mic input{margin:0}
 #ccMicState{font-size:12px;color:#8fa6c4;margin:0 0 6px}
@@ -457,6 +483,26 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
   </details>
   <span class="tool-divider"></span>
   <button id="btnAudio" title="Toggle audio playback" style="display:none">&#x1f507; Audio</button>
+  <div class="meet-controls">
+    <button id="btnMeet" type="button" title="会议录音（录音 + 字幕）" disabled><span class="meet-dot" aria-hidden="true"></span>会议<span id="meetWord" class="meet-word">…</span></button>
+    <details class="tool-group" id="meetMenu">
+      <summary title="会议录音设置" aria-label="会议录音设置">▾</summary>
+      <div class="tool-panel meet-panel"><h3>会议录音</h3>
+        <p id="meetState" role="status">连接中…</p>
+        <label>模式 <select id="meetMode" aria-label="会议录音模式">
+          <option value="auto">自动（有声音就录）</option><option value="manual">手动</option><option value="off">关闭</option>
+        </select></label>
+        <div class="rec-level">Target 声音 <meter id="meetLevel" aria-label="Target HDMI 音量" min="-90" max="0" low="-56" high="-6" optimum="-20" value="-90"></meter></div>
+        <p>自动：Target 有声音约 3 秒就开始录音并打开字幕，静音 3 分钟后结束。不录像，不自动生成 AI 会议记录。录音中点按钮会停止，本场会议不再自动录。</p>
+        <h3>我的麦克风</h3>
+        <p id="meetFocus"></p>
+        <div class="panel-row"><button id="btnMeetFocus" type="button" title="几场会议同时开时，你的麦克风字幕归这台">设为当前发言</button></div>
+        <h3>保存位置</h3>
+        <p id="meetDir"></p>
+        <p>录音（混合 / 对方 / 我 三轨）在 audio 文件夹，每天的字幕在 日期.md。永久保存，不会自动删除。</p>
+      </div>
+    </details>
+  </div>
   <div class="cc-controls">
     <button id="btnCC" type="button" aria-pressed="false" title="Live captions" disabled><span class="cc-dot" aria-hidden="true"></span>CC<span class="cc-word">关</span></button>
     <details class="tool-group" id="ccMenu">
@@ -547,8 +593,9 @@ body.fs-autohide #container,body.tb-hidden #container{height:calc(100% - var(--b
 <aside id="sidePanel" hidden aria-label="Captions and meeting points">
   <div id="sideResize" role="separator" aria-orientation="vertical" aria-label="Resize panel" title="拖动调整面板宽度"></div>
   <section id="ccHistory" class="side-section" aria-label="Caption history">
-    <header><button class="side-fold" type="button" data-section="ccHistory" aria-expanded="true" title="折叠/展开">▾</button><strong>字幕历史</strong><button id="ccHistoryCopy" type="button">复制</button><button id="ccHistoryDownload" type="button">下载 .txt</button><button id="ccHistoryClose" type="button" aria-label="Close side panel" title="关闭面板">×</button></header>
-    <div id="ccHistoryList" class="side-body"><p>还没有字幕。</p></div>
+    <header><button class="side-fold" type="button" data-section="ccHistory" aria-expanded="true" title="折叠/展开">▾</button><strong>字幕历史</strong><span class="cc-tabs" role="tablist" aria-label="字幕范围"><button id="ccTabMeeting" type="button" role="tab" aria-selected="true" title="当前会议的字幕">本场</button><button id="ccTabDay" type="button" role="tab" aria-selected="false" title="今天所有会议的字幕（和当天的 .md 文件相同）">今天</button></span><button id="ccHistoryCopy" type="button">复制</button><button id="ccHistoryDownload" type="button">下载 .txt</button><button id="ccHistoryClose" type="button" aria-label="Close side panel" title="关闭面板">×</button></header>
+    <div id="ccHistoryList" class="side-body" role="tabpanel"><p>还没有字幕。</p></div>
+    <div id="ccDayList" class="side-body" role="tabpanel" hidden><p>加载中…</p></div>
   </section>
   <div id="sideSplit" role="separator" aria-orientation="horizontal" aria-label="Resize sections" title="拖动调整上下比例"></div>
   <section id="livePoints" class="side-section" aria-label="Meeting points">
@@ -767,6 +814,8 @@ function connect() {
           srecConfigure(msg.server_recording || null);
           micCfg = msg.uplink || null;
           micRender();
+          capApply(msg.capture || {available:false});
+          ccSetTab(ccTab);   // restores the saved tab; 今天 asks for the day now that the socket is open
           if (msg.webrtc === false) {
             const b = document.getElementById("btnRtc");
             b.disabled = true;
@@ -795,6 +844,7 @@ function connect() {
         else if (msg.type === "audio_config") {
           setupAudioConfig(msg);
           updateRecordingDevices();
+          audioConfigArrived();
         }
         else if (msg.type === "capture_device") { serverCaptureLabel = msg.label || ""; }
         else if (msg.type === "webrtc_answer") {
@@ -822,6 +872,9 @@ function connect() {
           recordingUploadEvent(msg);
         }
         else if (msg.type === "srec_state") { srecApply(msg); }
+        else if (msg.type === "capture_state") { capApply(msg); }
+        else if (msg.type === "captions_day") { ccRenderDay(msg); }
+        else if (msg.type === "capture_level") { capLevel(msg); }
         else if (msg.type === "uplink_state") { micApply(msg); }
         else if (msg.type === "srec_error") {
           srecBusy = false;
@@ -1400,20 +1453,56 @@ async function enableAudioPlayback() {
 // Shared by every caller: the context is created synchronously on the first
 // call (so a click handler can create it inside the gesture), the worklet
 // loads after that; awaiting the same promise means "graph ready".
+// Plain-http pages that are not localhost (a phone on the LAN IP) have no
+// AudioWorklet: the same player class then runs on the main thread, driven
+// by a ScriptProcessor in 128-frame quanta, so buffering, fades and latency
+// trimming behave exactly as in the worklet.
+function scriptPlayerNode(ctx, options) {
+  const clock = {t: 0};
+  let Proc = null;
+  class Base {
+    constructor() {
+      this.port = {onmessage: null, postMessage: (data) => { if (node.port.onmessage) node.port.onmessage({data}); }};
+    }
+  }
+  new Function("sampleRate", "registerProcessor", "AudioWorkletProcessor", "clock",
+    WORKLET_SRC.replace(/currentTime/g, "clock.t"))(ctx.sampleRate, (name, cls) => { Proc = cls; }, Base, clock);
+  const channels = options.outputChannelCount[0];
+  const node = ctx.createScriptProcessor(2048, 1, channels);
+  const proc = new Proc({processorOptions: options.processorOptions});
+  node.port = {onmessage: null, postMessage: (buf) => proc.port.onmessage({data: buf})};
+  const quantum = [];
+  for (let c = 0; c < channels; c++) quantum.push(new Float32Array(128));
+  node.onaudioprocess = (e) => {
+    const out = e.outputBuffer;
+    for (let off = 0; off + 128 <= out.length; off += 128) {
+      clock.t = (e.playbackTime || ctx.currentTime) + off / ctx.sampleRate;
+      proc.process([], [quantum]);
+      for (let c = 0; c < out.numberOfChannels; c++) out.getChannelData(c).set(quantum[Math.min(c, channels - 1)], off);
+    }
+  };
+  return node;
+}
+
 let audioStarting = null;
 function startAudio() {
   if (!audioCfg) return Promise.resolve();
   if (!audioStarting) audioStarting = (async () => {
     audioCtx = new AudioContext({sampleRate: audioCfg.sampleRate});
-    const blob = new Blob([WORKLET_SRC], {type: "application/javascript"});
-    const url = URL.createObjectURL(blob);
-    await audioCtx.audioWorklet.addModule(url);
-    URL.revokeObjectURL(url);
     // A remote link jitters more: start later and allow more backlog.
-    audioNode = new AudioWorkletNode(audioCtx, "p", {
+    const options = {
       outputChannelCount: [audioCfg.channels],
       processorOptions: {channels: audioCfg.channels,
-                         prebufferMs: IS_LAN ? 100 : 150, maxMs: IS_LAN ? 300 : 400}});
+                         prebufferMs: IS_LAN ? 100 : 150, maxMs: IS_LAN ? 300 : 400}};
+    if (audioCtx.audioWorklet) {
+      const blob = new Blob([WORKLET_SRC], {type: "application/javascript"});
+      const url = URL.createObjectURL(blob);
+      await audioCtx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      audioNode = new AudioWorkletNode(audioCtx, "p", options);
+    } else {
+      audioNode = scriptPlayerNode(audioCtx, options);
+    }
     audioNode.port.onmessage = (e) => { audioStats = e.data; };
     playGain = audioCtx.createGain();
     playGain.gain.value = audioOn ? 1 : 0;
@@ -1973,16 +2062,82 @@ function ccHistoryText() {
   const labelled = ccHistory.some(h => h.speaker === "me");
   return ccHistory.map(h => ccClock(h.at) + "  " + (labelled ? CC_WHO[h.speaker] + "：" : "") + h.text).join("\n") + "\n";
 }
+// --- 字幕历史 tabs: 本场 (this meeting, live) / 今天 (every meeting of the day, from the server) ---
+const ccDayList = document.getElementById("ccDayList");
+let ccTab = "meeting";
+let ccDay = null;   // the last captions_day message
+try { if (localStorage.getItem("kvmCcTab") === "day") ccTab = "day"; } catch (e) {}
+function ccRequestDay() { wsSend({type:"captions_day"}); }
+function ccSetTab(tab) {
+  ccTab = tab === "day" ? "day" : "meeting";
+  try { localStorage.setItem("kvmCcTab", ccTab); } catch (e) {}
+  document.getElementById("ccTabMeeting").setAttribute("aria-selected", String(ccTab === "meeting"));
+  document.getElementById("ccTabDay").setAttribute("aria-selected", String(ccTab === "day"));
+  ccHistoryList.hidden = ccTab !== "meeting";
+  ccDayList.hidden = ccTab !== "day";
+  if (ccTab === "day") ccRequestDay(); else ccHistoryList.scrollTop = ccHistoryList.scrollHeight;
+}
+function ccDaySpan(m) {
+  const hm = sec => ccClock(sec * 1000).slice(0, 5);
+  return hm(m.start) + "–" + (m.live ? "（进行中）" : hm(m.end) + "（" + Math.max(0, Math.round((m.end - m.start) / 60)) + " 分钟）");
+}
+function ccRenderDay(msg) {
+  const para = text => Object.assign(document.createElement("p"), {textContent: text});
+  if (msg.error) { ccDayList.replaceChildren(para("加载失败：" + msg.error)); return; }
+  const first = ccDay === null || ccDay.date !== msg.date;
+  const stick = first || ccDayList.scrollTop + ccDayList.clientHeight >= ccDayList.scrollHeight - 30;
+  const keep = ccDayList.scrollTop;
+  ccDay = msg;
+  const meetings = msg.meetings || [];
+  const nodes = [Object.assign(para(msg.date + " · " + meetings.length + " 场会议 · " + (msg.file || "")), {className: "cc-day-note"})];
+  if (!meetings.length) nodes.push(para("今天还没有会议字幕。"));
+  for (const m of meetings) {
+    nodes.push(Object.assign(document.createElement("h4"), {textContent: ccDaySpan(m)}));
+    if (!m.rows.length) nodes.push(para("没有字幕：字幕服务离线，录音会在服务恢复后补转写。"));
+    const labelled = m.rows.some(r => r[1] === "me");
+    for (const [at, speaker, text, batch] of m.rows) {
+      const line = document.createElement("p");
+      if (speaker === "me") line.className = "cc-me";
+      const parts = [Object.assign(document.createElement("time"), {textContent: ccClock(at)})];
+      if (batch) parts.push(Object.assign(document.createElement("span"), {className: "cc-batch", textContent: "补",
+        title: "字幕服务离线时，事后从录音转写"}));
+      if (labelled || speaker === "me")
+        parts.push(Object.assign(document.createElement("span"), {className: "cc-who", textContent: CC_WHO[speaker] || CC_WHO.remote}));
+      parts.push(document.createTextNode(text));
+      line.append(...parts);
+      nodes.push(line);
+    }
+  }
+  ccDayList.replaceChildren(...nodes);
+  ccDayList.scrollTop = stick ? ccDayList.scrollHeight : keep;
+}
+function ccDayText() {
+  const meetings = (ccDay && ccDay.meetings) || [];
+  return meetings.map(m => "## " + ccDaySpan(m) + "\n" + m.rows.map(r =>
+    ccClock(r[0]) + "  " + (r[3] ? "补·" : "") + (CC_WHO[r[1]] || CC_WHO.remote) + "：" + r[2]).join("\n")).join("\n\n");
+}
+document.getElementById("ccTabMeeting").addEventListener("click", () => ccSetTab("meeting"));
+document.getElementById("ccTabDay").addEventListener("click", () => ccSetTab("day"));
+// 今天 follows the meetings while it is visible (same refresh rate as the daily .md).
+setInterval(() => { if (ccTab === "day" && !sidePanel.hidden) ccRequestDay(); }, 15000);
+
+function ccCurrentText() {
+  if (ccTab === "day") { const text = ccDayText(); return text ? text + "\n" : ""; }
+  return ccHistory.length ? ccHistoryText() : "";
+}
 async function ccCopy() {
-  if (!ccHistory.length) { showHint("还没有字幕"); return; }
-  try { await navigator.clipboard.writeText(ccHistoryText()); showHint("已复制 " + ccHistory.length + " 行字幕"); }
+  const text = ccCurrentText();
+  if (!text) { showHint("还没有字幕"); return; }
+  try { await navigator.clipboard.writeText(text); showHint("已复制 " + text.trim().split("\n").length + " 行字幕"); }
   catch (e) { showHint("复制失败：" + e.message); }
 }
 function ccDownload() {
-  if (!ccHistory.length) { showHint("还没有字幕"); return; }
-  const stamp = new Date(Date.now() + 9*3600*1000).toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
+  const text = ccCurrentText();
+  if (!text) { showHint("还没有字幕"); return; }
+  const stamp = ccTab === "day" && ccDay ? ccDay.date
+    : new Date(Date.now() + 9*3600*1000).toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([ccHistoryText()], {type: "text/plain;charset=utf-8"}));
+  a.href = URL.createObjectURL(new Blob([text], {type: "text/plain;charset=utf-8"}));
   a.download = "captions-" + stamp + "-JST.txt";
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
@@ -2028,6 +2183,7 @@ function setSidePanel(open) {
   if (open) {
     if (!pointsSection.classList.contains("folded")) ccBtn.classList.remove("has-badge");
     ccHistoryList.scrollTop = ccHistoryList.scrollHeight;
+    if (ccTab === "day") ccRequestDay();
   }
   updateLayout();
 }
@@ -2196,6 +2352,84 @@ setInterval(() => {
   if (ccOn && lsLast && lsLast.minutes && MINUTES_ACTIVE.includes(lsLast.minutes.state)) wsSend({type:"live_summary", action:"sync"});
 }, 5000);
 
+// --- Meeting capture: automatic audio recording + captions (server-wide) ---
+let capState = {available:false};
+let capNotice = "";
+const btnMeet = document.getElementById("btnMeet");
+function capClock(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : String(m)) + ":" + String(s).padStart(2, "0");
+}
+function capRender() {
+  const s = capState, word = document.getElementById("meetWord");
+  btnMeet.disabled = !s.available;
+  btnMeet.classList.toggle("meet-on", !!s.active);
+  btnMeet.classList.toggle("meet-auto", !!s.available && !s.active && s.mode === "auto" && !s.snoozed);
+  btnMeet.setAttribute("aria-pressed", String(!!s.active));
+  let state;
+  if (!s.available) {
+    word.textContent = "不可用"; state = s.reason || "会议录音不可用";
+  } else if (s.active) {
+    word.textContent = capClock(Date.now() / 1000 - (s.since || Date.now() / 1000));
+    state = "正在录音和出字幕（" + (s.trigger === "auto" ? "自动开始" : "手动开始") + "）。点按钮停止" +
+      (s.mode === "auto" ? "，本场会议不再自动录。" : "。");
+    // Silence countdown: an automatic session ends after s.silence seconds without sound.
+    if (s.trigger === "auto" && s.quiet >= 5 && s.silence) {
+      const left = Math.max(0, s.silence - s.quiet);
+      word.textContent += " · 静音 " + capClock(s.quiet);
+      state = "Target 已安静 " + capClock(s.quiet) + "，再过 " + capClock(left) + " 自动结束（有声音就继续录）。" + state;
+    }
+  } else if (s.mode === "off") {
+    word.textContent = "关"; state = "已关闭：不会录音。需要时把模式改成自动或手动。";
+  } else if (s.snoozed) {
+    word.textContent = "本场不录"; state = "这场会议已手动停止；Target 安静 3 分钟后恢复自动。点按钮可重新开始。";
+  } else if (s.mode === "auto") {
+    word.textContent = "自动"; state = "等待 Target 的声音。也可以点按钮马上开始。";
+  } else {
+    word.textContent = "手动"; state = "点按钮开始录音和字幕，再点一次停止。";
+  }
+  btnMeet.title = state;
+  document.getElementById("meetState").textContent = state + (s.notice ? "　" + s.notice : "");
+  document.getElementById("meetMode").value = s.mode || "auto";
+  document.getElementById("meetMode").disabled = !s.available;
+  const owner = s.mic_owner, me = s.target;
+  document.getElementById("meetFocus").textContent = !owner
+    ? "开会时你的麦克风会加入这台的字幕（标「我」）。几台同时开会时，归你最后操作的那台。"
+    : owner === me ? "你的麦克风字幕现在归这台（" + me + "）。"
+    : "你的麦克风字幕现在归 " + owner + "；这台照常录你的麦克风，但不给你的话出字幕。";
+  document.getElementById("btnMeetFocus").disabled = !s.available || owner === me;
+  document.getElementById("meetDir").textContent = s.dir || "";
+}
+function capApply(msg) {
+  capState = msg;
+  capRender();
+  if (msg.notice && msg.notice !== capNotice) showHint("会议录音：" + msg.notice);
+  capNotice = msg.notice || "";
+  meetingCheck();
+}
+function capLevel(msg) {
+  document.getElementById("meetLevel").value = Math.max(-90, Math.min(0, Number(msg.level) || -90));
+  capState.sound = !!msg.sound;
+  capState.quiet = msg.quiet;
+}
+btnMeet.addEventListener("click", () => {
+  if (!capState.available) return;
+  if (capState.mode === "off" && !capState.active) {
+    document.getElementById("meetMenu").open = true;
+    return;
+  }
+  wsSend({type:"capture", action: capState.active ? "stop" : "start"});
+  container.focus();
+});
+document.getElementById("meetMode").addEventListener("change", e => {
+  wsSend({type:"capture", action:"mode", mode:e.target.value});
+});
+document.getElementById("btnMeetFocus").addEventListener("click", () => {
+  wsSend({type:"capture", action:"focus"});
+});
+setInterval(() => { if (capState.active) capRender(); }, 1000);
+
 // --- Forgot to record? Offer it once a meeting is clearly under way ---
 // CC live + finals for 2+ minutes (gaps < 60 s) + this browser not recording.
 let meetRunStart = 0, meetLastFinal = 0;
@@ -2210,7 +2444,8 @@ function meetingCheck() {
   let ignored = null;
   try { ignored = sessionStorage.getItem("kvmMeetingIgnored"); } catch (e) {}
   const now = Date.now();
-  const busy = recording || recFinishing || recStarting || srecState.active || srecBusy;
+  // An automatic meeting recording (audio + captions) already covers the meeting.
+  const busy = recording || recFinishing || recStarting || srecState.active || srecBusy || capState.active;
   const show = ccOn && ccState === "live" && !busy && meetRunStart > 0 &&
     meetLastFinal - meetRunStart >= 120000 && now - meetLastFinal < 60000 && ignored !== meetingSessionId();
   if (meetingBar.hidden === show) { meetingBar.hidden = !show; updateLayout(); }
@@ -3077,6 +3312,35 @@ class WebViewerServer:
                                     getattr(config, "captions_meeting_gap", 30))
         self._meeting_task = None
         self._meeting_jobs: set = set()  # not awaited on stop (summaries can be long)
+        # Automatic meeting capture (HDMI sound -> audio + captions) and the
+        # daily caption .md files in meetings_dir.
+        meetings = meetings_root(config)
+        target = (config.target_name or f"web{config.web_port}").strip()
+        self._daily = DailyCaptions(config.recording_dir, meetings, target)
+        self._daily_dirty: set = set()
+        hub = (HubClient(config.ai_hub_url, getattr(config, "ai_hub_key", None))
+               if self._captions.available else None)
+        capture_on = getattr(config, "capture_enabled", True)
+        self._autocap = AutoCapture(
+            audio if capture_on else None, meetings, target, self._meeting, self._captions,
+            mode=getattr(config, "capture_mode", "auto"),
+            threshold_db=getattr(config, "capture_threshold_db", -55),
+            mic_name=getattr(config, "recording_mic", "EarPods") or "",
+            presence=Presence(target) if audio is not None and capture_on else None,
+            backfill=(Backfill(meetings, hub, getattr(config, "captions_language", "auto"),
+                               on_done=lambda started: self._mark_day(started)) if hub else None),
+            publish=self._broadcast, on_day_changed=self._mark_day)
+        if not capture_on:
+            self._autocap.reason = "会议录音已在服务器配置里停用（--no-capture）"
+        self._captions.on_state = self._autocap.caption_state
+        self._meeting.hold_cc = lambda: self._autocap.session is not None
+        meeting_final = self._captions.on_final
+
+        def on_final(item):
+            meeting_final(item)
+            self._mark_day(item["at"] / 1000)
+        self._captions.on_final = on_final
+        self._capture_task = None
         self._viewers: set = set()  # authenticated /ws clients (live_summary audience)
         self._loop = None
         self._meeting.publish = self._publish_meeting
@@ -3125,6 +3389,8 @@ class WebViewerServer:
         await asyncio.to_thread(self._minutes.start)
         self._loop = asyncio.get_running_loop()
         self._meeting_task = asyncio.create_task(self._meeting.loop())
+        self._autocap.start(self._loop)
+        self._capture_task = asyncio.create_task(self._capture_loop())
         try:
             await self._recover_server_recordings()
         except Exception:
@@ -3173,6 +3439,18 @@ class WebViewerServer:
             except (asyncio.CancelledError, Exception):
                 pass
             self._meeting_task = None
+        if self._capture_task is not None:
+            self._capture_task.cancel()
+            try:
+                await self._capture_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._capture_task = None
+        try:
+            await self._autocap.close()
+        except Exception:
+            logger.exception("Closing the meeting capture failed")
+        await asyncio.to_thread(self._write_dirty_days)
         await self._captions.close()
         if self._uplink is not None:
             self._uplink_owner = None
@@ -3397,6 +3675,67 @@ class WebViewerServer:
     def _publish_meeting(self, message):
         """Send live_summary to every viewer; callable from worker threads too."""
         self._broadcast(message)
+
+    # ---- automatic meeting capture + daily caption files ---------------------
+    def _mark_day(self, when):
+        """Re-render the daily .md of *when* (a date or epoch seconds) soon."""
+        if not isinstance(when, date):
+            when = datetime.fromtimestamp(float(when), _JST).date()
+        self._daily_dirty.add(when)
+
+    def _write_dirty_days(self):
+        days, self._daily_dirty = self._daily_dirty, set()
+        for day in sorted(days):
+            try:
+                self._daily.write(day)
+            except Exception:
+                logger.exception("Daily captions for %s not written", day)
+
+    async def _capture_loop(self):
+        """Presence/mic focus every 2 s, level to viewers, daily files every 15 s."""
+        try:
+            written = await asyncio.to_thread(self._daily.write_missing)
+            if written:
+                logger.info("Daily caption files written: %d", len(written))
+        except Exception:
+            logger.exception("Writing missing daily caption files failed")
+        ticks = 0
+        while True:
+            await asyncio.sleep(2)
+            ticks += 1
+            try:
+                self._autocap.tick_presence()
+                if self._viewers and self._autocap.available:
+                    self._broadcast({"type": "capture_level", "level": round(self._autocap.level, 1),
+                                     "sound": self._autocap.detector.active, "quiet": self._autocap.quiet()})
+                if ticks % 8 == 0:
+                    if self._captions.on or self._autocap.session is not None:
+                        self._mark_day(time.time())   # keeps 进行中 / end times current
+                    if self._daily_dirty:
+                        await asyncio.to_thread(self._write_dirty_days)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Meeting capture tick failed")
+
+    async def _capture_action(self, ws, ev):
+        action = ev.get("action")
+        try:
+            if action == "start":
+                await self._autocap.begin("manual")
+            elif action == "stop":
+                await self._autocap.stop("manual")
+            elif action == "mode":
+                await self._autocap.set_mode(str(ev.get("mode") or ""))
+            elif action == "focus":
+                self._autocap.touch_focus(force=True)
+            elif action != "sync":
+                raise ValueError("未知的会议录音操作")
+            if action in ("sync", "focus"):
+                await ws.send(json.dumps(self._autocap.state(), ensure_ascii=False))
+        except (OSError, ValueError, RuntimeError) as exc:
+            logger.warning("Meeting capture %s failed: %s", action, exc)
+            await ws.send(json.dumps({**self._autocap.state(), "notice": str(exc)}, ensure_ascii=False))
 
     # ---- server-side recording ---------------------------------------------
     def _server_recording_state(self):
@@ -3656,7 +3995,8 @@ class WebViewerServer:
                 "server_recording": {"available": True, "fps": list(FPS_CHOICES),
                                      "state": self._server_recording_state()},
                 "uplink": self._uplink_view(ws),
-            }))
+                "capture": self._autocap.state(),
+            }, ensure_ascii=False))
 
             # Tell the client which capture device the server uses, so direct
             # mode can pick the matching device via getUserMedia.
@@ -4414,10 +4754,27 @@ class WebViewerServer:
                         await self._uplink_stop(ws)
                     continue
 
+                if ev_type == "capture":
+                    # 会议 button: start/stop a capture session, mode, mic focus.
+                    await self._capture_action(ws, ev)
+                    continue
+
+                if ev_type == "captions_day":
+                    # 字幕历史 「今天」: every meeting of a JST day (same data as the daily .md).
+                    try:
+                        day = (date.fromisoformat(str(ev["date"])) if ev.get("date")
+                               else datetime.now(_JST).date())
+                        result = await asyncio.to_thread(self._daily.view, day)
+                    except (OSError, ValueError) as exc:
+                        result = {"type": "captions_day", "error": str(exc)}
+                    await ws.send(json.dumps(result, ensure_ascii=False))
+                    continue
+
                 if ev_type == "captions":
                     # The CC button switches CC for every viewer; the new
                     # state reaches all of them through their caption feeds.
                     try:
+                        self._autocap.cc_touched()
                         self._meeting.set_cc(bool(ev.get("on")))
                     except ValueError as exc:
                         await ws.send(json.dumps({"type":"captions_state", "state":"unavailable", "detail":str(exc)}))
@@ -4600,6 +4957,7 @@ class WebViewerServer:
 
                 elif ev_type == "keydown":
                     code = ev.get("code", "")
+                    self._autocap.touch_focus()
                     # Modifier key?
                     mod_bit = _JS_MOD_BITS.get(code)
                     if mod_bit is not None:
@@ -4638,6 +4996,7 @@ class WebViewerServer:
                     buttons = ev.get("buttons", 0)
                     x, y = self._map_mouse_abs(x, y)
                     push(build_mouse_abs_packet(buttons, x, y))
+                    self._autocap.touch_focus()   # the user works here: their mic captions go here
 
                 elif ev_type == "mouseup":
                     x = ev.get("x", 0)

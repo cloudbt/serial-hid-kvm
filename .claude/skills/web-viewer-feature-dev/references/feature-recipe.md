@@ -153,6 +153,24 @@ Run the `py_compile` + `node --check` block from SKILL.md. Restart server, reloa
 - Tests: `tests/test_live_meeting.py`, `tests/test_web_display.py`
   (zoom/Fit/panel widths keep the 0-4095 mapping).
 
+### Automatic meeting capture (`会议` button) and daily caption files
+- Server: `_auto_capture.py` `AutoCapture` — a monitor thread on the HDMI `AudioCapture`
+  feeds `SoundDetector` (3 s of sound in 10 s starts, 3 min of silence ends, threshold
+  -55 dBFS; HDMI digital silence is ~-84). A session records `meetings/audio/<day>/<stamp>.mka`
+  (ffmpeg, Opus tracks 混合 / Target HDMI / 本机麦克风, 15 s pre-roll) and switches CC on/off
+  with `LiveMeeting.set_cc(persist=False)`. `Presence` files in `%LOCALAPPDATA%/serial-hid-kvm/presence`
+  pick the one Target that captions the host mic (last operated, else earliest meeting);
+  `CaptionService.set_mic_focus`. `Backfill` transcribes HDMI stretches the hub missed.
+  `_daily_captions.py` `DailyCaptions` renders `meetings/<YYYY-MM-DD>.md` from `.captions/`,
+  audio sidecars, backfill rows and `recording-*.mp4`.
+- Client: `capApply` / `capRender` (toolbar `#btnMeet`, `#meetMenu`), 字幕历史 tabs
+  `ccSetTab` / `ccRenderDay` (`captions_day`, localStorage `kvmCcTab`).
+- Config: `meetings_dir` ("" = `meetings` beside the recordings folder), `capture_enabled`
+  (`--no-capture`), `capture_mode`, `capture_threshold_db`. Tests: `tests/test_auto_capture.py`;
+  conftest turns capture off by default (it subscribes to the HDMI feed permanently).
+- Plain-http viewers (a phone on the LAN IP) have no AudioWorklet: `scriptPlayerNode` runs the
+  same `WORKLET_SRC` class behind a ScriptProcessor (`tests/web_audio_script_player.cjs`).
+
 ### Microphone uplink (`Mic` button)
 - Client: `micStart` → `getUserMedia` (echoCancellation/noiseSuppression/AGC,
   mono) → AudioWorklet `mic-up` (20 ms int16 frames) → binary `0x12`; frames

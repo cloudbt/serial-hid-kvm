@@ -184,6 +184,14 @@ class CaptionService:
         self.mic_name = mic_name or ""
         self.mic_available = bool(self.available and mic is not None)
         self.mic_on = self.mic_available
+        # Several Targets in meetings at once: only one captions the host
+        # microphone (AutoCapture decides; True when this Target may).
+        self.mic_focus = True
+        # Audio from before CC was switched on (AutoCapture pre-roll), sent
+        # first by the next HDMI hub session.
+        self._preroll = None
+        # Optional hook: on_state(speaker, state) for every link state change.
+        self.on_state = None
         self._links = {REMOTE: _Link(REMOTE, audio=audio)}
         if self.mic_available:
             self._links[ME] = _Link(ME, opener=mic)
@@ -226,6 +234,24 @@ class CaptionService:
         self._broadcast(self.state_message())
         return True
 
+    def set_mic_focus(self, focus):
+        """Whether this Target captions the host microphone now; True when it changed."""
+        focus = bool(focus)
+        if focus == self.mic_focus:
+            return False
+        self.mic_focus = focus
+        if self.on:
+            self._start_links()
+        self._broadcast(self.state_message())
+        return True
+
+    def set_preroll(self, chunks):
+        """Raw HDMI chunks (the AudioCapture format) to send before live audio."""
+        self._preroll = list(chunks) if chunks else None
+
+    def remote_state(self):
+        return self._links[REMOTE].state[0]
+
     def _start_links(self):
         for link in self._links.values():
             if not self._wanted(link):
@@ -252,7 +278,7 @@ class CaptionService:
         mic_state, mic_detail = self._links[ME].state if ME in self._links else ("off", "")
         return {"type": "captions_state", "state": state, "detail": detail, "on": self.on, "since": self.on_since,
                 "mic": {"available": self.mic_available, "on": self.mic_on, "name": self.mic_name,
-                        "state": mic_state, "detail": mic_detail}}
+                        "state": mic_state, "detail": mic_detail, "focus": self.mic_focus}}
 
     def subscribe(self):
         """Register a viewer queue: CC state, recent captions while on, meeting state."""
@@ -294,10 +320,15 @@ class CaptionService:
             return
         link.state = (state, detail)
         logger.info("Captions%s %s%s", " (mic)" if link.speaker == ME else "", state, f": {detail}" if detail else "")
+        if self.on_state is not None:
+            try:
+                self.on_state(link.speaker, state)
+            except Exception:
+                logger.exception("Caption state hook failed")
         self._broadcast(self.state_message())
 
     def _wanted(self, link):
-        return self.on and (link.speaker == REMOTE or self.mic_on)
+        return self.on and (link.speaker == REMOTE or (self.mic_on and self.mic_focus))
 
     # -- recordings --------------------------------------------------------
     def begin_recording(self, session, path, origin):
@@ -327,7 +358,11 @@ class CaptionService:
 
     def _describe(self, exc):
         status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None)
-        if status in (401, 403):
+        if status in (429, 503):
+            return f"hub is full: too many caption streams at once (HTTP {status})"
+        if status == 403:
+            return "hub refused (HTTP 403): wrong SHKVM_AI_HUB_KEY, or its limit of caption streams is reached"
+        if status == 401:
             return f"hub rejected the key (HTTP {status}); check SHKVM_AI_HUB_KEY"
         if status:
             return f"hub refused captions (HTTP {status})"
@@ -406,6 +441,14 @@ class CaptionService:
                     link.epoch = None
                     receiver = asyncio.create_task(self._receive(ws, link))
                     self._set_state(link, "live")
+                    preroll, self._preroll = (self._preroll, None) if link.speaker == REMOTE else (None, self._preroll)
+                    if preroll:  # the seconds before CC was switched on
+                        data = b"".join(preroll)
+                        link.epoch = time.time() - len(data) / (2 * audio.channels * audio.samplerate)
+                        pending = resampler.process(data)
+                        while len(pending) >= BLOCK_SAMPLES:
+                            await ws.send(pending[:BLOCK_SAMPLES].tobytes())
+                            pending = pending[BLOCK_SAMPLES:]
                     while self._wanted(link):
                         chunk = await loop.run_in_executor(None, _get_chunk, q)
                         if receiver.done():
