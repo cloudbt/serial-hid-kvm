@@ -155,6 +155,8 @@ class LiveMeeting:
         self._closed = None        # (meta, last, previous) of the last finalized session
         # Viewer hook: publish(message) to every authenticated viewer.
         self.publish = None
+        # AutoCapture hook: True while a capture session keeps CC on.
+        self.hold_cc = None
         self.runners = {"agy": self._run_agy, "codex": self._run_codex, "mac-qwen": self._run_mac}
         captions.on_final = self.add_final
         captions.on_subscribe = self.on_subscribe
@@ -190,13 +192,20 @@ class LiveMeeting:
                 self._save(summarizer=name)
             self.broadcast()
 
-    def set_cc(self, on, reason="viewer"):
-        """CC on/off for every viewer. Turning it off never starts a summary."""
+    def set_cc(self, on, reason="viewer", persist=True):
+        """CC on/off for every viewer. Turning it off never starts a summary.
+
+        persist=False (automatic capture) leaves the saved switch alone, so a
+        restart does not bring back CC that only an automatic session opened.
+        """
         on = bool(on)
         changed = self.captions.set_on(on)  # ValueError when captions are unavailable
         if on:
             self.ensure_session()
-        if changed or self.cc_saved != on:
+        if not persist:
+            if changed:
+                logger.info("CC %s (%s)", "on" if on else "off", reason)
+        elif changed or self.cc_saved != on:
             self.cc_saved = on
             self._store_settings()
             logger.info("CC %s (%s)", "on" if on else "off", reason)
@@ -418,7 +427,8 @@ class LiveMeeting:
         return (now or time.monotonic()) - self.last_run >= self.interval * 60
 
     async def tick(self):
-        if self.captions.active and self.captions.viewers_idle() > self.IDLE_OFF:
+        held = self.hold_cc is not None and self.hold_cc()   # an automatic capture session needs CC
+        if self.captions.active and not held and self.captions.viewers_idle() > self.IDLE_OFF:
             # Forgotten CC: stop the captions only - nothing is summarized.
             self.set_cc(False, f"no viewer for {self.IDLE_OFF // 3600} h")
         if self.session is not None:
